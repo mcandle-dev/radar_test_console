@@ -114,7 +114,9 @@ def _parse_json_line(raw: str, ts: float) -> ParseResult:
     if JSON_ANGLE_KEY in entry:
         angle_deg = _number_to_int(entry[JSON_ANGLE_KEY])
         if angle_deg is None:
-            return _invalid(raw, f"LAoA_deg is not a number: {entry[JSON_ANGLE_KEY]!r}", ts)
+            return _invalid(
+                raw, f"LAoA_deg is not a number: {entry[JSON_ANGLE_KEY]!r}", ts
+            )
 
     measurement = Measurement(dist_cm=dist_cm, angle_deg=angle_deg, raw=raw, ts=ts)
     return ParseResult("measurement", measurement, None, raw, None, ts)
@@ -141,7 +143,9 @@ def _json_failure_reason(data: Dict[str, Any]) -> str:
     if not isinstance(results, list):
         return "no D_cm in JSON"
     statuses = [
-        str(_lower_keys(e).get(JSON_STATUS_KEY, "?")) for e in results if isinstance(e, dict)
+        str(_lower_keys(e).get(JSON_STATUS_KEY, "?"))
+        for e in results
+        if isinstance(e, dict)
     ]
     if not statuses:
         return "empty JSON results"

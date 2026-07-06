@@ -12,18 +12,23 @@ from typing import Deque, Optional, Tuple
 
 import flet as ft
 
+import uci_params
 from models import DeviceEvent, Measurement, SessionState
 from parser import is_out_of_range, parse_line
 from radar_device import (
     LINK_LOG_PREFIX,
+    UCI_LOG_PREFIX,
     QorvoSerialDevice,
     RadarDevice,
     SimulatorDevice,
+    UciSerialDevice,
 )
 from radar_view import RadarView
 
 # 보드가 없으면 시뮬레이터(True), 있으면 실물(False). 이 한 줄만 바꾸면 된다.
 USE_SIMULATOR = False
+# 실물 모드에서: UCI 펌웨어(DW3_QM33 SDK UCI)면 True, CLI 텍스트 펌웨어면 False.
+USE_UCI = True
 
 PUMP_INTERVAL_S = 0.05  # 큐 → 화면 반영 주기 50ms (NFR-1 지연 100ms 이내)
 RX_TIMEOUT_S = 2.0  # 무수신 판정 (NFR-3)
@@ -263,6 +268,8 @@ class LogConsole(ft.Container):
             return COLOR_ERR, "⚠ 연결 오류"
         if raw.startswith("TX"):
             return ft.Colors.CYAN_300, "→ 전송"
+        if raw.startswith(UCI_LOG_PREFIX):  # UCI 프로토콜 정보 (파싱 대상 아님)
+            return ft.Colors.PURPLE_200, "ⓘ UCI"
         result = parse_line(raw)
         if result.kind == "measurement":
             return ft.Colors.GREY_300, "✔ 파싱 OK"
@@ -317,8 +324,10 @@ class RadarApp:
 
     @staticmethod
     def _create_device() -> RadarDevice:
-        """USE_SIMULATOR 스위치에 따라 디바이스 구현을 고른다."""
-        return SimulatorDevice() if USE_SIMULATOR else QorvoSerialDevice()
+        """USE_SIMULATOR/USE_UCI 스위치에 따라 디바이스 구현을 고른다."""
+        if USE_SIMULATOR:
+            return SimulatorDevice()
+        return UciSerialDevice() if USE_UCI else QorvoSerialDevice()
 
     def _build_connection_bar(self) -> None:
         """포트/속도 선택 + 상태 LED + 연결 토글 버튼."""
@@ -336,6 +345,16 @@ class RadarApp:
         # 실패 재현 토글은 시뮬레이터 전용 — 실물 모드에선 숨긴다
         self.fail_switch = ft.Switch(
             label="OOB 실패 재현", value=False, visible=USE_SIMULATOR
+        )
+        # 폰 주소(DST_MAC)는 세션마다 바뀔 수 있어 실행 중 변경 가능 — UCI 모드 전용
+        self.dest_mac_tf = ft.TextField(
+            label="폰 주소",
+            value=uci_params.DEFAULT_DEST_MAC,
+            width=110,
+            tooltip="폰 앱 화면의 '내 주소' (XX:XX hex) — Enter로 반영",
+            visible=isinstance(self.device, UciSerialDevice),
+            on_submit=self._on_dest_mac_commit,
+            on_blur=self._on_dest_mac_commit,
         )
         # FR-8: ranging 시작/정지 명령 (펌웨어 미지원이면 디바이스가 no-op+로그 처리)
         self.start_btn = ft.OutlinedButton(
@@ -365,6 +384,7 @@ class RadarApp:
                 ft.Text("속도"),
                 self.baud_dd,
                 self.fail_switch,
+                self.dest_mac_tf,
                 self.start_btn,
                 self.stop_btn,
                 ft.Container(expand=True),
@@ -408,6 +428,11 @@ class RadarApp:
         else:
             self._connect()
         self.page.update()
+
+    def _on_dest_mac_commit(self, e: ft.ControlEvent) -> None:
+        """폰 주소 입력 확정(Enter/포커스 이탈) 시 디바이스에 반영한다."""
+        if isinstance(self.device, UciSerialDevice):
+            self.device.set_dest_mac(self.dest_mac_tf.value or "")
 
     def _on_refresh_ports(self, e: ft.ControlEvent) -> None:
         """포트 목록 재탐색."""

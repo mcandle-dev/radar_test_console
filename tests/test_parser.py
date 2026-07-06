@@ -139,7 +139,9 @@ class TestCliJson:
 
     def test_no_angle_key(self) -> None:
         """LAoA_deg 없으면 angle_deg=None (DWM3001CDK는 AoA 미지원 가능)."""
-        r = parse_line('{"Block":5,"results":[{"Status":"Ok","D_cm":120}]}', ts=FIXED_TS)
+        r = parse_line(
+            '{"Block":5,"results":[{"Status":"Ok","D_cm":120}]}', ts=FIXED_TS
+        )
         assert r.kind == "measurement"
         assert r.measurement is not None
         assert r.measurement.dist_cm == 120
@@ -163,7 +165,8 @@ class TestCliJson:
     def test_rx_timeout_block(self) -> None:
         """측정 없는 블록(Rx timeout 등) → invalid, Status를 사유에 보존."""
         r = parse_line(
-            '{"Block":124,"results":[{"Addr":"0x0001","Status":"Rx timeout"}]}', ts=FIXED_TS
+            '{"Block":124,"results":[{"Addr":"0x0001","Status":"Rx timeout"}]}',
+            ts=FIXED_TS,
         )
         assert r.kind == "invalid"
         assert r.error is not None

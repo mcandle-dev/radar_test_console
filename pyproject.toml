@@ -1,0 +1,20 @@
+# 코드 품질 도구 설정 — uci/는 vendored 서드파티(Qorvo)라 검사 대상에서 제외 (uci/README.md)
+
+[tool.ruff]
+extend-exclude = ["uci"]
+
+[tool.black]
+extend-exclude = "^/uci/"
+
+[tool.mypy]
+exclude = ["^uci/"]
+
+[[tool.mypy.overrides]]
+module = "uci.*"
+follow_imports = "skip"
+ignore_missing_imports = true
+
+# 타입 스텁이 없는 외부 라이브러리 (flet: py.typed 미제공, pyserial: stubs 미설치)
+[[tool.mypy.overrides]]
+module = ["flet", "flet.*", "serial", "serial.*"]
+ignore_missing_imports = true
