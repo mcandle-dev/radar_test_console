@@ -132,6 +132,27 @@ def test_dest_mac_to_uci_rejects_bad_format(bad: str) -> None:
         uci_params.dest_mac_to_uci(bad)
 
 
+def test_parse_dest_macs_single_and_multi() -> None:
+    """쉼표/공백 구분 다중 주소 → UCI 정수 리스트 (1개=unicast, N개=multicast)."""
+    assert uci_params.parse_dest_macs("5F:DD") == [0xDD5F]
+    assert uci_params.parse_dest_macs("5F:DD, A1:B2") == [0xDD5F, 0xB2A1]
+    assert uci_params.parse_dest_macs("5F:DD A1:B2") == [0xDD5F, 0xB2A1]
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "",  # 빈 입력
+        "5F:DD, oops",  # 형식 오류 포함
+        "5F:DD, 5F:DD",  # 중복
+        "01:01,02:02,03:03,04:04,05:05,06:06",  # MAX_CONTROLEES 초과
+    ],
+)
+def test_parse_dest_macs_rejects_bad(bad: str) -> None:
+    with pytest.raises(ValueError):
+        uci_params.parse_dest_macs(bad)
+
+
 # --- start_ranging 명령 시퀀스 인코딩 ---
 
 
@@ -194,6 +215,26 @@ def test_set_app_config_tlv_bytes_match_phone_profile() -> None:
     for tlv in expected_tlvs:
         assert tlv in tlvs, f"TLV 누락/불일치: {tlv.hex('.')}"
     assert len(tlvs) == sum(len(t) for t in expected_tlvs)  # 그 외 파라미터 없음
+
+
+def test_start_ranging_multicast_sets_one_to_many() -> None:
+    """폰 주소 2개 → MULTI_NODE_MODE=1 + NUMBER_OF_CONTROLEES=2 + DST 리스트 인코딩."""
+    h = Harness(dest_mac="5F:DD, A1:B2")
+    tr = h.connect()
+    h.device.start_ranging()
+    h.wait_worker()
+
+    tlvs = tr.written[1][9:]  # 헤더(4) + sid(4) + 파라미터 개수(1) 이후
+    assert b"\x03\x01\x01" in tlvs  # MULTI_NODE_MODE = one-to-many
+    assert b"\x05\x01\x02" in tlvs  # NUMBER_OF_CONTROLEES = 2
+    assert b"\x07\x04\x5f\xdd\xa1\xb2" in tlvs  # DST_MAC_ADDRESS = [5F:DD, A1:B2]
+    assert [e.state for e in h.events] == [SessionState.RANGING]
+
+
+def test_set_dest_mac_accepts_comma_separated_list() -> None:
+    h = Harness()
+    assert h.device.set_dest_mac("5F:DD, A1:B2") is True
+    assert h.device.set_dest_mac("5F:DD, 5F:DD") is False  # 중복은 거부, 기존 값 유지
 
 
 def test_start_ranging_with_invalid_dest_mac_emits_err_without_tx() -> None:

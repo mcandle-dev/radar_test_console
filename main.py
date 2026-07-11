@@ -9,7 +9,7 @@ import queue
 import time
 from collections import deque
 from pathlib import Path
-from typing import Deque, Optional, Tuple
+from typing import Deque, NamedTuple, Optional, Sequence, Tuple
 
 import flet as ft
 
@@ -24,7 +24,7 @@ from radar_device import (
     SimulatorDevice,
     UciSerialDevice,
 )
-from radar_view import RadarView
+from radar_view import RadarTarget, RadarView
 
 # 보드가 없으면 시뮬레이터(True), 있으면 실물(False). 이 한 줄만 바꾸면 된다.
 USE_SIMULATOR = False
@@ -43,8 +43,26 @@ BAUD_OPTIONS = (9600, 57600, 115200, 230400, 921600)
 LOG_FONT = "Consolas"
 WINDOW_WIDTH = 1060
 WINDOW_HEIGHT = 900
-PANEL_WIDTH = 280
+PANEL_WIDTH = 470
 LOG_HEIGHT = 220
+
+MAX_TARGETS = 5  # 동시 표시 타겟 수 (uci_params.MAX_CONTROLEES와 동일)
+# 타겟별 고정 팔레트 — 테이블 ● 표시와 레이더 점/링이 같은 색을 쓴다
+TARGET_COLORS = ("#00E676", "#40C4FF", "#FF80AB", "#B388FF", "#FFEA00")
+DEFAULT_TARGET_LABEL = "타겟"  # target_id가 없는 단일 타겟 표시명
+
+# 타겟 테이블: 행 상태 표기 + 컬럼 폭(px)
+TARGET_STATUS_EMPTY = "—"  # 빈 슬롯
+TARGET_STATUS_WAIT = "대기"  # 주소는 등록됐지만 아직 측정 없음
+TARGET_STATUS_OK = "정상"
+TARGET_STATUS_NO_RX = "수신없음"  # 2초 이상 무수신 (타겟별)
+TABLE_FONT_SIZE = 12
+COL_TARGET_W = 92
+COL_DIST_W = 60
+COL_ANGLE_W = 46
+COL_RATE_W = 62
+COL_LAST_RX_W = 64
+COL_STATUS_W = 56
 
 TIMELINE_STAGES = (
     SessionState.SLEEP,
@@ -118,17 +136,31 @@ class SessionTimeline(ft.Row):
                 self._chips[stage].bgcolor = COLOR_IDLE
 
 
-class NumericPanel(ft.Container):
-    """거리·각도·수신율·최종수신·세션·상태를 보여주는 우측 수치 패널."""
+class TargetRow(NamedTuple):
+    """타겟 테이블 한 행의 표시 스냅숏 (튜플 비교로 변경 감지)."""
+
+    label: str
+    dist_cm: Optional[int]
+    angle_deg: Optional[int]
+    warn: bool
+    rate: int
+    last_rx: str
+    stale: bool
+    color: str
+
+
+class TargetPanel(ft.Container):
+    """타겟별 거리·각도·수신율 행 + 공통 상태(전체 수신율/세션/상태) 패널."""
 
     def __init__(self) -> None:
-        self._dist = ft.Text("—", size=32, weight=ft.FontWeight.BOLD)
-        self._angle = ft.Text("—", size=24)
+        self._empty = ft.Text("측정 대기 중 — 타겟 없음", color=COLOR_TEXT_DIM, size=12)
+        self._rows = ft.Column(controls=[self._empty], spacing=10, tight=True)
         self._rate = ft.Text("0 건/초")
         self._last_rx = ft.Text("—")
         self._session = ft.Text("N/A")
         self._status = ft.Text("미연결", color=COLOR_IDLE)
         self._rate_value = 0
+        self._snapshot: Tuple[TargetRow, ...] = ()
         super().__init__(
             width=PANEL_WIDTH,
             padding=16,
@@ -136,8 +168,8 @@ class NumericPanel(ft.Container):
             bgcolor=ft.Colors.with_opacity(0.05, ft.Colors.WHITE),
             content=ft.Column(
                 controls=[
-                    self._row("거리", self._dist),
-                    self._row("각도", self._angle),
+                    ft.Text("타겟", weight=ft.FontWeight.BOLD),
+                    self._rows,
                     ft.Divider(height=1),
                     self._row("수신율", self._rate),
                     self._row("최종수신", self._last_rx),
@@ -156,32 +188,56 @@ class NumericPanel(ft.Container):
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
-    def set_measurement(
-        self, m: Measurement, warn: bool, target_label: Optional[str] = None
-    ) -> None:
-        """측정값 갱신. 범위 초과면 경고색, ANGLE 없으면 'N/A'."""
-        color = COLOR_WARN if warn else ft.Colors.WHITE
-        prefix = ""
-        if target_label:
-            prefix = f"{target_label}: "
-        elif m.target_id:
-            prefix = f"{m.target_id}: "
-        if m.dist_cm is None:
-            self._dist.value = "—"
-        else:
-            self._dist.value = f"{prefix}{m.dist_cm} cm"
-        self._dist.color = color
-        self._angle.value = "N/A" if m.angle_deg is None else f"{m.angle_deg} °"
-        self._angle.color = color
-        self._last_rx.value = time.strftime("%H:%M:%S", time.localtime(m.ts))
+    def update_targets(self, rows: Sequence[TargetRow]) -> bool:
+        """타겟 행들을 갱신한다. 내용이 바뀌었을 때만 True (불필요한 update 방지)."""
+        snap = tuple(rows)
+        if snap == self._snapshot:
+            return False
+        self._snapshot = snap
+        self._rows.controls = [self._build_row(r) for r in snap] or [self._empty]
+        return True
+
+    @staticmethod
+    def _build_row(r: TargetRow) -> ft.Control:
+        """타겟 1행 = [● 라벨 … 거리] + [각도·수신율·최종수신] 두 줄."""
+        name_color = COLOR_TEXT_DIM if r.stale else ft.Colors.WHITE
+        dist_color = (
+            COLOR_TEXT_DIM if r.stale else (COLOR_WARN if r.warn else ft.Colors.WHITE)
+        )
+        dot = ft.Container(
+            width=10,
+            height=10,
+            border_radius=5,
+            bgcolor=COLOR_IDLE if r.stale else r.color,
+        )
+        dist_text = "—" if r.dist_cm is None else f"{r.dist_cm} cm"
+        angle_text = "N/A" if r.angle_deg is None else f"{r.angle_deg}°"
+        detail = f"각도 {angle_text} · {r.rate} 건/초 · {r.last_rx}"
+        if r.stale:
+            detail += " · 수신없음"
+        name = ft.Text(r.label, size=13, weight=ft.FontWeight.BOLD, color=name_color)
+        dist = ft.Text(dist_text, size=16, weight=ft.FontWeight.BOLD, color=dist_color)
+        head = ft.Row(
+            controls=[dot, name, ft.Container(expand=True), dist],
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+        return ft.Column(
+            controls=[head, ft.Text(detail, size=11, color=COLOR_TEXT_DIM)],
+            spacing=2,
+            tight=True,
+        )
 
     def set_rate(self, count: int) -> bool:
-        """수신율 표시. 값이 바뀌었을 때만 True (불필요한 page.update 방지)."""
+        """전체 수신율 표시. 값이 바뀌었을 때만 True (불필요한 page.update 방지)."""
         if count == self._rate_value:
             return False
         self._rate_value = count
         self._rate.value = f"{count} 건/초"
         return True
+
+    def set_last_rx(self, ts: float) -> None:
+        """마지막 수신 시각(전체 기준)을 갱신한다."""
+        self._last_rx.value = time.strftime("%H:%M:%S", time.localtime(ts))
 
     def set_session(self, event: DeviceEvent) -> None:
         """세션 상태 표시. ERR은 사유와 함께 적색."""
@@ -200,9 +256,10 @@ class NumericPanel(ft.Container):
         self._status.color = color
 
     def reset_values(self) -> None:
-        """미연결 상태 표시(값 '—')로 되돌린다."""
-        self._dist.value = "—"
-        self._angle.value = "—"
+        """미연결 상태 표시로 되돌린다 (타겟 행 비움)."""
+        self._snapshot = ()
+        self._rows.controls = [self._empty]
+        self._last_rx.value = "—"
         self._session.value = "N/A"
         self._session.color = ft.Colors.WHITE
 
@@ -318,16 +375,18 @@ class RadarApp:
 
         self.radar = RadarView()
         self.timeline = SessionTimeline()
-        self.panel = NumericPanel()
+        self.panel = TargetPanel()
         self.log = LogConsole()
-        self._max_targets = 5
-        self._target_labels: dict[str, str] = {}
         self._build_connection_bar()
 
         self._meas_ts: Deque[float] = deque()
         self._last_rx: Optional[float] = None
         self._status_cache: Tuple[str, str] = ("", "")
+        # 타겟별 상태: 최신 측정 / 수신율 창 / 배정 색 / 레이더 스냅숏(변경 감지)
         self._latest_targets: dict[str, Measurement] = {}
+        self._target_ts: dict[str, Deque[float]] = {}
+        self._target_colors: dict[str, str] = {}
+        self._radar_snapshot: Tuple[RadarTarget, ...] = ()
         self._running = True
         # 자동 재연결(NFR-4): 사용자가 원한 연결이 끊기면 포트 복귀를 기다렸다 재시도
         self._want_connected = False
@@ -361,31 +420,18 @@ class RadarApp:
             label="OOB 실패 재현", value=False, visible=USE_SIMULATOR
         )
         # 폰 주소(DST_MAC)는 세션마다 바뀔 수 있어 실행 중 변경 가능 — UCI 모드 전용
+        # 쉼표로 여러 개 입력하면 one-to-many(multicast) 세션이 된다
         self.dest_mac_tf = ft.TextField(
             label="폰 주소",
             value=uci_params.DEFAULT_DEST_MAC,
-            width=110,
-            tooltip="폰 앱 화면의 '내 주소' (XX:XX hex) — Enter로 반영",
+            width=220,
+            tooltip=(
+                "폰 앱 화면의 '내 주소' (XX:XX hex) — Enter로 반영. "
+                f"쉼표로 최대 {uci_params.MAX_CONTROLEES}개 (예: 5F:DD, A1:B2)"
+            ),
             visible=isinstance(self.device, UciSerialDevice),
             on_submit=self._on_dest_mac_commit,
             on_blur=self._on_dest_mac_commit,
-        )
-        self.target_fields: list[ft.TextField] = []
-        for idx in range(1, self._max_targets + 1):
-            field = ft.TextField(
-                label=f"타겟 {idx}",
-                value=str(idx),
-                width=70,
-                dense=True,
-                tooltip=f"타겟 {idx} 표시 이름",
-                on_submit=self._on_target_label_commit,
-                on_blur=self._on_target_label_commit,
-            )
-            self.target_fields.append(field)
-        self.target_wrap = ft.Column(
-            controls=self.target_fields,
-            spacing=4,
-            tight=True,
         )
         # FR-8: ranging 시작/정지 명령 (펌웨어 미지원이면 디바이스가 no-op+로그 처리)
         self.start_btn = ft.OutlinedButton(
@@ -416,7 +462,6 @@ class RadarApp:
                 self.baud_dd,
                 self.fail_switch,
                 self.dest_mac_tf,
-                self.target_wrap,
                 self.start_btn,
                 self.stop_btn,
                 ft.Container(expand=True),
@@ -466,15 +511,6 @@ class RadarApp:
         if isinstance(self.device, UciSerialDevice):
             self.device.set_dest_mac(self.dest_mac_tf.value or "")
 
-    def _on_target_label_commit(self, e: ft.ControlEvent) -> None:
-        """타겟 라벨 입력이 바뀌면 표시 이름을 갱신한다."""
-        self._target_labels = {}
-        for field in self.target_fields:
-            label = (field.value or "").strip()
-            if not label:
-                continue
-            self._target_labels[label] = label
-
     def _on_refresh_ports(self, e: ft.ControlEvent) -> None:
         """포트 목록 재탐색."""
         ports = self.device.list_ports()
@@ -489,10 +525,9 @@ class RadarApp:
             self.device.simulate_oob_timeout = self.fail_switch.value
         self.timeline.reset()
         self.panel.reset_values()
-        self.radar.hide_point()
+        self._reset_targets()
         self._meas_ts.clear()
         self._last_rx = None
-        self._latest_targets.clear()
         port = self.port_dd.value or ""
         if not port:
             self.log.append_sys(
@@ -515,8 +550,17 @@ class RadarApp:
         self._want_connected = False  # 사용자가 원한 해제 — 자동 재연결 중단
         self.device.disconnect()
         self.connect_btn.text = "연결"
-        self.radar.hide_point()
+        self._reset_targets()
+        self.panel.reset_values()
         self.log.append_sys("연결 해제됨")
+
+    def _reset_targets(self) -> None:
+        """타겟별 상태와 레이더 표시를 모두 비운다 (연결 시작/해제 시)."""
+        self._latest_targets.clear()
+        self._target_ts.clear()
+        self._target_colors.clear()
+        self._radar_snapshot = ()
+        self.radar.hide_point()
 
     # --- 큐 펌프 (백그라운드 스레드에서 50ms 주기, 콜백은 큐에만 쌓임) ---
 
@@ -524,6 +568,7 @@ class RadarApp:
         """큐를 비워 화면에 반영하는 갱신 루프. 메인 UI 루프에서 즉시 갱신한다."""
         while self._running:
             dirty = self._drain_queue()
+            dirty |= self._refresh_targets()
             dirty |= self._refresh_rate()
             dirty |= self._refresh_status()
             dirty |= self._try_reconnect()
@@ -558,48 +603,87 @@ class RadarApp:
         return dirty
 
     def _apply_measurement(self, m: Measurement) -> None:
-        """측정 1건을 레이더·수치 패널에 반영한다. 다중 타겟이면 최대 5개까지 동시 표시한다."""
-        warn = is_out_of_range(m)
-        target_key = m.target_id or "default"
-        if m.dist_cm is not None and m.angle_deg is not None:
-            self._latest_targets[target_key] = m
-            self._trim_targets()
-            points = [
-                (
-                    t.dist_cm if t.dist_cm is not None else 0,
-                    t.angle_deg if t.angle_deg is not None else 0,
-                    is_out_of_range(t),
-                    self._target_label(t.target_id),
-                )
-                for t in list(self._latest_targets.values())
-                if t.dist_cm is not None and t.angle_deg is not None
-            ]
-            if points:
-                self.radar.update_points(points)
-            else:
-                self.radar.hide_point()
-        else:
-            self.radar.hide_point()
-        self.panel.set_measurement(m, warn, self._target_label(m.target_id))
+        """측정 1건을 타겟별 최신값·수신율 창에 반영한다 (그리기는 _refresh_targets)."""
+        key = m.target_id or "default"
+        self._latest_targets[key] = m  # 기존 키 재대입은 삽입 순서 유지 → 행 순서 안정
+        self._target_ts.setdefault(key, deque()).append(m.ts)
+        self._assign_color(key)
+        self._trim_targets()
+        self.panel.set_last_rx(m.ts)
         self._last_rx = m.ts
         self._meas_ts.append(m.ts)
 
     def _trim_targets(self) -> None:
-        """최대 타겟 수를 초과한 오래된 항목부터 정리한다."""
-        if len(self._latest_targets) <= self._max_targets:
+        """최대 타겟 수 초과 시 가장 오래 안 보인 타겟부터 제거한다 (행 순서 유지)."""
+        overflow = len(self._latest_targets) - MAX_TARGETS
+        if overflow <= 0:
             return
-        ordered = sorted(
-            self._latest_targets.items(),
-            key=lambda item: item[1].ts,
-            reverse=True,
-        )
-        self._latest_targets = dict(ordered[: self._max_targets])
+        oldest = sorted(self._latest_targets, key=lambda k: self._latest_targets[k].ts)[
+            :overflow
+        ]
+        for key in oldest:
+            del self._latest_targets[key]
+            self._target_ts.pop(key, None)
+            self._target_colors.pop(key, None)
 
-    def _target_label(self, target_id: Optional[str]) -> Optional[str]:
-        """타겟 ID를 사용자 지정 라벨로 바꿔 화면에 표시한다."""
-        if target_id is None:
-            return None
-        return self._target_labels.get(target_id, target_id)
+    def _assign_color(self, key: str) -> None:
+        """새 타겟에 팔레트 색을 배정한다 (제거된 타겟의 색은 재사용)."""
+        if key in self._target_colors:
+            return
+        used = set(self._target_colors.values())
+        free = [c for c in TARGET_COLORS if c not in used]
+        self._target_colors[key] = free[0] if free else TARGET_COLORS[0]
+
+    def _target_rate(self, key: str, now: float) -> int:
+        """타겟별 최근 1초 창의 측정 건수."""
+        ts = self._target_ts.get(key)
+        if ts is None:
+            return 0
+        cutoff = now - RATE_WINDOW_S
+        while ts and ts[0] < cutoff:
+            ts.popleft()
+        return len(ts)
+
+    def _refresh_targets(self) -> bool:
+        """타겟 테이블·레이더를 최신 스냅숏으로 갱신한다. 변경이 있으면 True."""
+        now = time.time()
+        rows: list[TargetRow] = []
+        radar_targets: list[RadarTarget] = []
+        for key, m in self._latest_targets.items():
+            row, radar = self._snapshot_target(key, m, now)
+            rows.append(row)
+            if radar is not None:
+                radar_targets.append(radar)
+        dirty = self.panel.update_targets(rows)
+        snap = tuple(radar_targets)
+        if snap != self._radar_snapshot:
+            self._radar_snapshot = snap
+            self.radar.update_points(list(snap))
+            dirty = True
+        return dirty
+
+    def _snapshot_target(
+        self, key: str, m: Measurement, now: float
+    ) -> Tuple[TargetRow, Optional[RadarTarget]]:
+        """타겟 1개의 테이블 행과 레이더 표시(없으면 None) 스냅숏을 만든다."""
+        stale = (now - m.ts) > RX_TIMEOUT_S  # 타겟별 수신없음 → 회색 행 + 레이더 제외
+        warn = is_out_of_range(m)
+        color = self._target_colors.get(key, TARGET_COLORS[0])
+        label = key if m.target_id else DEFAULT_TARGET_LABEL
+        row = TargetRow(
+            label=label,
+            dist_cm=m.dist_cm,
+            angle_deg=m.angle_deg,
+            warn=warn,
+            rate=self._target_rate(key, now),
+            last_rx=time.strftime("%H:%M:%S", time.localtime(m.ts)),
+            stale=stale,
+            color=color,
+        )
+        radar: Optional[RadarTarget] = None
+        if not stale and m.dist_cm is not None:
+            radar = RadarTarget(m.dist_cm, m.angle_deg, warn, label, color)
+        return row, radar
 
     def _refresh_rate(self) -> bool:
         """최근 1초 창의 측정 건수 = 수신율(건/초)."""
@@ -616,8 +700,8 @@ class RadarApp:
         self._status_cache = status
         label, color = status
         if label == "수신없음":
+            # 6.4: 점 숨김은 _refresh_targets의 타겟별 stale 처리로 수행 (같은 2초 기준)
             self.log.append_sys(f"경고: {RX_TIMEOUT_S:.0f}초 이상 수신 없음 (NFR-3)")
-            self.radar.hide_point()  # 6.4: 수신없음이면 점 숨김 (수치는 마지막 값 유지)
         elif label == "끊김":
             self.log.append_sys("연결 끊김 감지 — 포트 복귀 시 자동 재연결 (NFR-4)")
         self.led.bgcolor = color

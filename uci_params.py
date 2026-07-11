@@ -7,6 +7,9 @@
 
 주의: 여기 값 하나라도 폰과 다르면 에러 없이 '무증상 실패'(세션은 붙는데 측정 0건)한다.
       SESSION_ID와 dest MAC(폰 주소)만 가변, 나머지는 고정.
+
+multicast: 폰 주소를 쉼표로 여러 개 넣으면 one-to-many(MULTI_NODE_MODE=1) 세션이 된다.
+      이때 폰 쪽도 multicast 프로파일(CONFIG_MULTICAST_DS_TWR)로 시작해야 측정이 나온다.
 """
 
 import re
@@ -17,13 +20,14 @@ from uci import App
 # --- 가변 파라미터 (UI에서 변경 가능) ---
 SESSION_ID = 42  # 폰 앱 기본 Session ID와 쌍
 DEFAULT_DEST_MAC = "00:00"  # 폰 주소 placeholder — 실제 값은 폰 앱 화면에서 확인해 입력
+MAX_CONTROLEES = 5  # 동시 controlee(타겟) 상한 — UI 타겟 표시 한도와 동일
 
 # --- 역할/토폴로지 (폰=controlee/responder 와 상보) ---
 DEVICE_TYPE = 1  # controller
 DEVICE_ROLE = 1  # initiator
 DEVICE_MAC_ADDRESS = 0x0000  # 폰 앱의 '보드 MAC' 기본값 "00:00"과 쌍
-MULTI_NODE_MODE = 0  # unicast
-NUMBER_OF_CONTROLEES = 1
+MULTI_NODE_MODE_UNICAST = 0  # controlee 1개
+MULTI_NODE_MODE_ONE_TO_MANY = 1  # controlee 2개 이상 (multicast)
 RANGING_ROUND_USAGE = 2  # DS-TWR deferred
 SCHEDULE_MODE = 1  # time-based
 RFRAME_CONFIG = 3  # SP3
@@ -69,16 +73,49 @@ def dest_mac_to_uci(mac: str) -> int:
     return int(mac[-2:] + mac[0:2], 16)
 
 
-def build_app_configs(dest_mac_uci: int) -> List[AppConfig]:
+def parse_dest_macs(text: str) -> List[int]:
+    """쉼표/공백으로 구분한 폰 주소 목록을 UCI 정수 리스트로 변환한다.
+
+    1개면 unicast, 2개 이상이면 one-to-many(multicast) 세션이 된다.
+    빈 입력·형식 오류·중복·MAX_CONTROLEES 초과는 ValueError.
+    """
+    parts = [p for p in re.split(r"[,\s]+", text.strip()) if p]
+    if not parts:
+        raise ValueError("폰 주소가 비어 있음 — 'XX:XX' hex 형식으로 입력")
+    if len(parts) > MAX_CONTROLEES:
+        raise ValueError(f"폰 주소는 최대 {MAX_CONTROLEES}개까지 (입력 {len(parts)}개)")
+    macs = [dest_mac_to_uci(p) for p in parts]
+    if len(set(macs)) != len(macs):
+        raise ValueError(f"폰 주소에 중복이 있음: {text!r}")
+    return macs
+
+
+def split_dest_macs(text: str) -> List[str]:
+    """입력 텍스트를 개별 'xx:xx' 표시 문자열(소문자)로 분해한다.
+
+    UCI RANGE_DATA의 target_id 표기(소문자 'xx:xx')와 같아서 UI 행 선등록에 쓴다.
+    형식 오류·중복·초과는 parse_dest_macs와 동일하게 ValueError.
+    """
+    parse_dest_macs(text)  # 형식/중복/개수 검증 재사용
+    return [p.lower() for p in re.split(r"[,\s]+", text.strip()) if p]
+
+
+def build_app_configs(dest_macs_uci: List[int]) -> List[AppConfig]:
     """SESSION_SET_APP_CONFIG 파라미터 목록을 만든다.
 
     순서·구성은 run_fira_twr.py 기본 실행과 동일 (진단·키 회전 옵션은 미사용이라 제외).
+    controlee 수에 따라 unicast/one-to-many(multicast)를 자동 선택한다.
     """
+    multi_node_mode = (
+        MULTI_NODE_MODE_UNICAST
+        if len(dest_macs_uci) == 1
+        else MULTI_NODE_MODE_ONE_TO_MANY
+    )
     return [
         # Fira 필수 최소 구성
         (App.DeviceType, DEVICE_TYPE),
         (App.DeviceRole, DEVICE_ROLE),
-        (App.MultiNodeMode, MULTI_NODE_MODE),
+        (App.MultiNodeMode, multi_node_mode),
         (App.RangingRoundUsage, RANGING_ROUND_USAGE),
         (App.DeviceMacAddress, DEVICE_MAC_ADDRESS),
         # 추가 구성
@@ -100,7 +137,7 @@ def build_app_configs(dest_mac_uci: int) -> List[AppConfig]:
         (App.HoppingMode, HOPPING_MODE),
         (App.RssiReporting, RSSI_REPORTING),
         (App.BlockStrideLength, BLOCK_STRIDE_LENGTH),
-        (App.NumberOfControlees, NUMBER_OF_CONTROLEES),
-        (App.DstMacAddress, [dest_mac_uci]),  # UCI 스펙상 리스트
+        (App.NumberOfControlees, len(dest_macs_uci)),
+        (App.DstMacAddress, dest_macs_uci),  # UCI 스펙상 리스트 (2바이트 × N)
         (App.StsLength, STS_LENGTH),
     ]

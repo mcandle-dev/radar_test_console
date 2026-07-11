@@ -60,6 +60,9 @@ SIM_ANGLE_MIN_DEG = -90
 SIM_ANGLE_MAX_DEG = 90
 SIM_ANGLE_STEP_DEG = 5
 SIM_OOB_TIMEOUT_REASON = "OOB_TIMEOUT"
+SIM_NUM_TARGETS = 3  # 다중 타겟 UI 검증용 기본 생성 수
+SIM_TARGET_DIST_SPACING_CM = 40  # 타겟별 초기 거리 간격
+SIM_TARGET_ANGLE_SPREAD_DEG = 35  # 타겟별 초기 각도 간격
 
 
 class RadarDevice(ABC):
@@ -111,11 +114,17 @@ class SimulatorDevice(RadarDevice):
 
     simulate_oob_timeout=True면 OOB 단계에서 STATE:ERR,REASON:OOB_TIMEOUT을
     재현해 UI의 에러 표시를 보드 없이 테스트할 수 있다.
+    num_targets개의 타겟("1".."N")을 동시에 흘려 다중 타겟 UI를 검증한다.
     """
 
-    def __init__(self, simulate_oob_timeout: bool = False) -> None:
+    def __init__(
+        self,
+        simulate_oob_timeout: bool = False,
+        num_targets: int = SIM_NUM_TARGETS,
+    ) -> None:
         super().__init__()
         self.simulate_oob_timeout = simulate_oob_timeout
+        self._num_targets = max(1, num_targets)
         self._stop_event = threading.Event()
         self._ranging_enabled = True  # stop_ranging()으로 측정만 일시정지
         self._thread: threading.Thread | None = None
@@ -185,23 +194,45 @@ class SimulatorDevice(RadarDevice):
         return True
 
     def _run_ranging_loop(self) -> None:
-        """거리/각도 랜덤 워크를 10Hz로 생성해 콜백으로 내보낸다."""
-        dist = SIM_DIST_INITIAL_CM
-        angle = SIM_ANGLE_INITIAL_DEG
+        """타겟별 거리/각도 랜덤 워크를 10Hz로 생성해 콜백으로 내보낸다."""
+        dists, angles = self._initial_targets()
         while not self._stop_event.wait(SIM_MEASUREMENT_INTERVAL_S):
             if not self._ranging_enabled:
                 continue
-            dist = _clamped_walk(
-                dist, SIM_DIST_STEP_CM, SIM_DIST_MIN_CM, SIM_DIST_MAX_CM
+            for tid in dists:
+                dists[tid] = _clamped_walk(
+                    dists[tid], SIM_DIST_STEP_CM, SIM_DIST_MIN_CM, SIM_DIST_MAX_CM
+                )
+                angles[tid] = _clamped_walk(
+                    angles[tid],
+                    SIM_ANGLE_STEP_DEG,
+                    SIM_ANGLE_MIN_DEG,
+                    SIM_ANGLE_MAX_DEG,
+                )
+                self._emit_measurement(tid, dists[tid], angles[tid])
+
+    def _initial_targets(self) -> tuple[dict[str, int], dict[str, int]]:
+        """타겟 ID("1"..N)별 초기 거리/각도를 서로 겹치지 않게 배치한다."""
+        dists: dict[str, int] = {}
+        angles: dict[str, int] = {}
+        center = (self._num_targets - 1) / 2
+        for i in range(self._num_targets):
+            tid = str(i + 1)
+            dists[tid] = SIM_DIST_INITIAL_CM + i * SIM_TARGET_DIST_SPACING_CM
+            angles[tid] = int(
+                SIM_ANGLE_INITIAL_DEG + (i - center) * SIM_TARGET_ANGLE_SPREAD_DEG
             )
-            angle = _clamped_walk(
-                angle, SIM_ANGLE_STEP_DEG, SIM_ANGLE_MIN_DEG, SIM_ANGLE_MAX_DEG
+        return dists, angles
+
+    def _emit_measurement(self, tid: str, dist: int, angle: int) -> None:
+        """타겟 1건 측정을 원시 라인 로그와 함께 콜백으로 내보낸다."""
+        raw = f"DIST:{dist},ANGLE:{angle},TARGET:{tid}"
+        self.on_log(raw)
+        self.on_measurement(
+            Measurement(
+                dist_cm=dist, angle_deg=angle, raw=raw, ts=time.time(), target_id=tid
             )
-            raw = f"DIST:{dist},ANGLE:{angle}"
-            self.on_log(raw)
-            self.on_measurement(
-                Measurement(dist_cm=dist, angle_deg=angle, raw=raw, ts=time.time())
-            )
+        )
 
     def _emit_state(self, state: SessionState, reason: str | None) -> None:
         """세션 이벤트를 원시 라인 로그와 함께 콜백으로 내보낸다."""
@@ -319,6 +350,7 @@ class UciSerialDevice(RadarDevice):
     역할: 보드 = controller/initiator, 폰(uwb_controlee_app) = controlee/responder.
     폰 앱을 먼저 Start시킨 뒤 start_ranging()을 호출해야 한다.
     세션 파라미터는 uci_params.py 한 파일에 고정 (폰과 바이트 단위 일치 필수).
+    폰 주소를 쉼표로 여러 개 주면 one-to-many(multicast) 세션으로 시작한다.
     """
 
     def __init__(self, dest_mac: str = uci_params.DEFAULT_DEST_MAC) -> None:
@@ -380,14 +412,15 @@ class UciSerialDevice(RadarDevice):
     # --- 세션 제어 (명령 응답 대기가 있어 워커 스레드에서 수행 — UI 무정지) ---
 
     def set_dest_mac(self, mac: str) -> bool:
-        """폰 주소('XX:XX')를 갱신한다. 형식 오류면 False + 로그 (기존 값 유지)."""
+        """폰 주소('XX:XX', 쉼표로 복수 가능)를 갱신한다. 오류면 False + 로그 (기존 값 유지)."""
         try:
-            uci_params.dest_mac_to_uci(mac)
+            macs = uci_params.parse_dest_macs(mac)
         except ValueError as e:
             self.on_log(f"{UCI_LOG_PREFIX} 폰 주소 무시: {e}")
             return False
         self._dest_mac = mac.strip()
-        self.on_log(f"{UCI_LOG_PREFIX} 폰 주소(DST_MAC) = {self._dest_mac}")
+        mode = "unicast" if len(macs) == 1 else f"multicast({len(macs)})"
+        self.on_log(f"{UCI_LOG_PREFIX} 폰 주소(DST_MAC) = {self._dest_mac} [{mode}]")
         return True
 
     def start_ranging(self) -> None:
@@ -412,7 +445,7 @@ class UciSerialDevice(RadarDevice):
     def _do_start(self) -> None:
         """세션 시작 시퀀스. 각 단계 실패 시 ERR 이벤트 + 세션 정리."""
         try:
-            dest_mac_uci = uci_params.dest_mac_to_uci(self._dest_mac)
+            dest_macs_uci = uci_params.parse_dest_macs(self._dest_mac)
         except ValueError as e:
             self._emit_err("DEST_MAC_INVALID", str(e))
             return
@@ -421,7 +454,7 @@ class UciSerialDevice(RadarDevice):
                 handle = self._session_init()
                 if handle is None:
                     return
-                if not self._session_configure(handle, dest_mac_uci):
+                if not self._session_configure(handle, dest_macs_uci):
                     return
                 self._ranging_start(handle)
             except UciComError as e:
@@ -437,13 +470,16 @@ class UciSerialDevice(RadarDevice):
             return None
         return int(handle) if handle is not None else sid
 
-    def _session_configure(self, handle: int, dest_mac_uci: int) -> bool:
+    def _session_configure(self, handle: int, dest_macs_uci: List[int]) -> bool:
         """SESSION_SET_APP_CONFIG — 파라미터는 uci_params.build_app_configs()."""
+        mode = (
+            "unicast" if len(dest_macs_uci) == 1 else f"multicast({len(dest_macs_uci)})"
+        )
         self.on_log(
-            f"TX {UCI_LOG_PREFIX} SET_APP_CONFIG (dest_mac={self._dest_mac}, "
+            f"TX {UCI_LOG_PREFIX} SET_APP_CONFIG (dest_mac={self._dest_mac} [{mode}], "
             f"ch={uci_params.CHANNEL_NUMBER}, interval={uci_params.RANGING_DURATION}ms)"
         )
-        configs = uci_params.build_app_configs(dest_mac_uci)
+        configs = uci_params.build_app_configs(dest_macs_uci)
         status, msg = self._client.session_set_app_config(handle, configs)
         if status != UciStatus.Ok:
             self._emit_err(

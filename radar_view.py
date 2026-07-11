@@ -1,7 +1,8 @@
 """Canvas 기반 360° 레이더 위젯 — UI 전용, 디바이스·시리얼을 전혀 모른다."""
 
 import math
-from typing import List, Tuple
+from dataclasses import dataclass
+from typing import List, Optional, Tuple
 
 import flet as ft
 import flet.canvas as cv
@@ -15,12 +16,25 @@ POINT_RADIUS_PX = 6
 GRID_LABEL_SIZE = 10
 POINT_LABEL_SIZE = 12
 GRID_STROKE_WIDTH = 1
+RING_STROKE_WIDTH = 2  # 각도 없는 타겟(거리만)의 링 두께
+RING_LABEL_OFFSET_PX = 14
 
 BG_COLOR = "#0a140d"
 GRID_COLOR = ft.Colors.GREEN_900
 GRID_LABEL_COLOR = ft.Colors.GREEN_700
-POINT_COLOR = ft.Colors.GREEN_ACCENT_400
+POINT_COLOR = ft.Colors.GREEN_ACCENT_400  # 색 미지정 시 기본색
 POINT_WARN_COLOR = ft.Colors.ORANGE_ACCENT_400  # 범위 초과 경고색
+
+
+@dataclass(frozen=True)
+class RadarTarget:
+    """레이더에 그릴 타겟 1개. angle_deg=None이면 거리 링으로 표시한다."""
+
+    dist_cm: int
+    angle_deg: Optional[int]
+    warn: bool
+    label: Optional[str]
+    color: str = POINT_COLOR
 
 
 class RadarView(ft.Container):
@@ -42,36 +56,68 @@ class RadarView(ft.Container):
             alignment=ft.Alignment(0.5, 0.5),
         )
 
-    def update_points(self, points: List[Tuple[int, int, bool, str | None]]) -> None:
-        """여러 측정 포인트를 한 번에 그려 다중 타겟 표시를 지원한다."""
+    def update_points(self, targets: List[RadarTarget]) -> None:
+        """여러 타겟을 한 번에 그린다 (각도 있음=점, 없음=거리 링)."""
         shapes: List[cv.Shape] = list(self._background)
-        for dist_cm, angle_deg, warn, target_id in points:
-            x, y = self._polar_to_xy(dist_cm, angle_deg)
-            color = POINT_WARN_COLOR if warn else POINT_COLOR
-            shapes.append(
-                cv.Circle(
-                    x,
-                    y,
-                    POINT_RADIUS_PX,
-                    ft.Paint(color=color, style=ft.PaintingStyle.FILL),
-                )
-            )
-            label = f"{dist_cm}cm / {angle_deg}°"
-            if target_id is not None:
-                label = f"{target_id}: {label}"
-            shapes.append(
-                cv.Text(
-                    x + POINT_RADIUS_PX + 4,
-                    y - POINT_RADIUS_PX - 12,
-                    label,
-                    ft.TextStyle(size=POINT_LABEL_SIZE, color=color),
-                )
-            )
+        for t in targets:
+            if t.angle_deg is None:
+                shapes.extend(self._ring_shapes(t))
+            else:
+                shapes.extend(self._point_shapes(t))
         self._canvas.shapes = shapes
 
     def hide_point(self) -> None:
-        """데이터 없음/angle 미지원 시 점을 숨기고 배경만 남긴다."""
+        """데이터 없음 시 타겟 표시를 숨기고 배경만 남긴다."""
         self._canvas.shapes = list(self._background)
+
+    def _point_shapes(self, t: RadarTarget) -> List[cv.Shape]:
+        """각도가 있는 타겟 = 채운 점 + 라벨. 범위 초과면 경고색."""
+        assert t.angle_deg is not None
+        x, y = self._polar_to_xy(t.dist_cm, t.angle_deg)
+        color = POINT_WARN_COLOR if t.warn else t.color
+        label = f"{t.dist_cm}cm / {t.angle_deg}°"
+        if t.label is not None:
+            label = f"{t.label}: {label}"
+        return [
+            cv.Circle(
+                x,
+                y,
+                POINT_RADIUS_PX,
+                ft.Paint(color=color, style=ft.PaintingStyle.FILL),
+            ),
+            cv.Text(
+                x + POINT_RADIUS_PX + 4,
+                y - POINT_RADIUS_PX - 12,
+                label,
+                ft.TextStyle(size=POINT_LABEL_SIZE, color=color),
+            ),
+        ]
+
+    def _ring_shapes(self, t: RadarTarget) -> List[cv.Shape]:
+        """각도 없는 타겟(UCI 보드=안테나 1개) = 그 거리 반지름의 링 + 라벨."""
+        r_px = min(t.dist_cm, MAX_DIST_CM) / MAX_DIST_CM * self._radius_px
+        color = POINT_WARN_COLOR if t.warn else t.color
+        label = f"{t.dist_cm}cm"
+        if t.label is not None:
+            label = f"{t.label}: {label}"
+        return [
+            cv.Circle(
+                self._cx,
+                self._cy,
+                r_px,
+                ft.Paint(
+                    color=color,
+                    stroke_width=RING_STROKE_WIDTH,
+                    style=ft.PaintingStyle.STROKE,
+                ),
+            ),
+            cv.Text(
+                self._cx + 4,
+                self._cy - r_px - RING_LABEL_OFFSET_PX,
+                label,
+                ft.TextStyle(size=POINT_LABEL_SIZE, color=color),
+            ),
+        ]
 
     def _polar_to_xy(self, dist_cm: int, angle_deg: int) -> Tuple[float, float]:
         """x = cx + r·sin(θ), y = cy − r·cos(θ). 범위 초과 거리는 바깥 눈금에 클램프."""
