@@ -1,8 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 Qorvo US, Inc.
 # SPDX-License-Identifier: LicenseRef-QORVO-2
-#
-# Vendored from: https://github.com/sasodoma/uwb-ranging @ commit aad72a0
-#   (path: new_python_script/uci/addin_transport_uart.py) — Qorvo DW3_QM33_SDK UCI 라이브러리 사본, 무수정.
 
 # Do not put in __all__ your uci Client, new Gids, or other extension objects
 # unless you want to block the addin mechanism.
@@ -96,9 +93,17 @@ class UartTransport(serial.threaded.ReaderThread, ITransport):
         self.connect()
 
     def __del__(self):
-        if os.name != "nt":
-            self.serial.cancel_read()
-            self.close()
+        try:
+            if getattr(self, "serial", None) is not None:
+                cancel = getattr(self.serial, "cancel_read", None)
+                if callable(cancel):
+                    try:
+                        cancel()
+                    except Exception:
+                        pass
+                self.close()
+        except Exception:
+            pass
 
     @staticmethod
     def handle(port):

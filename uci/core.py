@@ -1,8 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 Qorvo US, Inc.
 # SPDX-License-Identifier: LicenseRef-QORVO-2
-#
-# Vendored from: https://github.com/sasodoma/uwb-ranging @ commit aad72a0
-#   (path: new_python_script/uci/core.py) — Qorvo DW3_QM33_SDK UCI 라이브러리 사본, 무수정.
 
 import logging
 import weakref
@@ -185,8 +182,12 @@ class Client:
 
     def close(self):
         if hasattr(self, "transport"):
-            if self.transport():
-                self.transport().close()
+            try:
+                transport = self.transport()
+                if transport:
+                    transport.close()
+            except Exception:
+                logger.exception("Error closing transport")
 
     def set_handlers(self, handlers):
         self.notif_handlers = handlers

@@ -528,9 +528,16 @@ class UciSerialDevice(RadarDevice):
             return
         dist_cm = int(meas.distance)
         raw = f"DIST:{dist_cm}"  # 기존 데이터 계약과 같은 표기 → 로그 콘솔이 ✔로 분류
+        target_id = _normalize_target_id(getattr(meas, "mac_add", None))
         self.on_log(raw)
         self.on_measurement(
-            Measurement(dist_cm=dist_cm, angle_deg=None, raw=raw, ts=time.time())
+            Measurement(
+                dist_cm=dist_cm,
+                angle_deg=None,
+                raw=raw,
+                ts=time.time(),
+                target_id=target_id,
+            )
         )
 
     def _on_session_status_ntf(self, payload: bytes) -> None:
@@ -573,6 +580,19 @@ class UciSerialDevice(RadarDevice):
 def _uci_status_name(status: Any) -> str:
     """UCI Status enum을 'Name(0x..)' 표기로 바꾼다 (로그용)."""
     return f"{status.name}({int(status):#x})"
+
+
+def _normalize_target_id(value: Any) -> Optional[str]:
+    """UCI의 MAC 주소 문자열을 화면용 식별자 형태로 정규화한다."""
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if not text or text == "na":
+        return None
+    parts = [part for part in text.split(":") if part]
+    if len(parts) == 2:
+        return ":".join(reversed(parts))
+    return text
 
 
 def _friendly_open_error(port: str, e: Exception) -> str:

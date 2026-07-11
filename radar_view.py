@@ -39,30 +39,34 @@ class RadarView(ft.Container):
             bgcolor=BG_COLOR,
             border_radius=12,
             padding=8,
-            alignment=ft.alignment.center,
+            alignment=ft.Alignment(0.5, 0.5),
         )
 
-    def update_point(self, dist_cm: int, angle_deg: int, warn: bool = False) -> None:
-        """측정 점을 극좌표→화면좌표로 변환해 표시한다. 범위 초과면 경고색."""
-        x, y = self._polar_to_xy(dist_cm, angle_deg)
-        color = POINT_WARN_COLOR if warn else POINT_COLOR
+    def update_points(self, points: List[Tuple[int, int, bool, str | None]]) -> None:
+        """여러 측정 포인트를 한 번에 그려 다중 타겟 표시를 지원한다."""
         shapes: List[cv.Shape] = list(self._background)
-        shapes.append(
-            cv.Circle(
-                x,
-                y,
-                POINT_RADIUS_PX,
-                ft.Paint(color=color, style=ft.PaintingStyle.FILL),
+        for dist_cm, angle_deg, warn, target_id in points:
+            x, y = self._polar_to_xy(dist_cm, angle_deg)
+            color = POINT_WARN_COLOR if warn else POINT_COLOR
+            shapes.append(
+                cv.Circle(
+                    x,
+                    y,
+                    POINT_RADIUS_PX,
+                    ft.Paint(color=color, style=ft.PaintingStyle.FILL),
+                )
             )
-        )
-        shapes.append(
-            cv.Text(
-                x + POINT_RADIUS_PX + 4,
-                y - POINT_RADIUS_PX - 12,
-                f"{dist_cm}cm / {angle_deg}°",
-                ft.TextStyle(size=POINT_LABEL_SIZE, color=color),
+            label = f"{dist_cm}cm / {angle_deg}°"
+            if target_id is not None:
+                label = f"{target_id}: {label}"
+            shapes.append(
+                cv.Text(
+                    x + POINT_RADIUS_PX + 4,
+                    y - POINT_RADIUS_PX - 12,
+                    label,
+                    ft.TextStyle(size=POINT_LABEL_SIZE, color=color),
+                )
             )
-        )
         self._canvas.shapes = shapes
 
     def hide_point(self) -> None:

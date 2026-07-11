@@ -1,8 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 Qorvo US, Inc.
 # SPDX-License-Identifier: LicenseRef-QORVO-2
-#
-# Vendored from: https://github.com/sasodoma/uwb-ranging @ commit aad72a0
-#   (path: new_python_script/uci/fira_msg.py) — Qorvo DW3_QM33_SDK UCI 라이브러리 사본, 무수정.
 
 """
 This library is handling FIRA uci data format and conversion

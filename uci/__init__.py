@@ -1,8 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 Qorvo US, Inc.
 # SPDX-License-Identifier: LicenseRef-QORVO-2
-#
-# Vendored from: https://github.com/sasodoma/uwb-ranging @ commit aad72a0
-#   (path: new_python_script/uci/__init__.py) — Qorvo DW3_QM33_SDK UCI 라이브러리 사본, 무수정.
 
 """
 This file is configuring the package depending on the available variant.

@@ -25,6 +25,7 @@ class Measurement:
     angle_deg: Optional[int]  # 각도(°, 0=정면). 미지원이면 None
     raw: str  # 원시 수신 라인 (디버깅용)
     ts: float  # 수신 시각(epoch)
+    target_id: Optional[str] = None  # 다중 타겟 표시용 식별자
 
 
 @dataclass

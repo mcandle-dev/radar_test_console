@@ -3,6 +3,7 @@
 주의: UI는 RadarDevice 인터페이스에만 의존한다. 이 파일에 import serial 금지.
 """
 
+import asyncio
 import logging
 import queue
 import time
@@ -75,7 +76,7 @@ class SessionTimeline(ft.Row):
         for i, stage in enumerate(TIMELINE_STAGES):
             chip = ft.Container(
                 content=ft.Text(stage.value, size=12, color=ft.Colors.WHITE),
-                padding=ft.padding.symmetric(horizontal=12, vertical=6),
+                padding=ft.Padding(12, 6, 12, 6),
                 border_radius=14,
                 bgcolor=COLOR_IDLE,
             )
@@ -155,10 +156,20 @@ class NumericPanel(ft.Container):
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
-    def set_measurement(self, m: Measurement, warn: bool) -> None:
+    def set_measurement(
+        self, m: Measurement, warn: bool, target_label: Optional[str] = None
+    ) -> None:
         """측정값 갱신. 범위 초과면 경고색, ANGLE 없으면 'N/A'."""
         color = COLOR_WARN if warn else ft.Colors.WHITE
-        self._dist.value = f"{m.dist_cm} cm"
+        prefix = ""
+        if target_label:
+            prefix = f"{target_label}: "
+        elif m.target_id:
+            prefix = f"{m.target_id}: "
+        if m.dist_cm is None:
+            self._dist.value = "—"
+        else:
+            self._dist.value = f"{prefix}{m.dist_cm} cm"
         self._dist.color = color
         self._angle.value = "N/A" if m.angle_deg is None else f"{m.angle_deg} °"
         self._angle.color = color
@@ -309,11 +320,14 @@ class RadarApp:
         self.timeline = SessionTimeline()
         self.panel = NumericPanel()
         self.log = LogConsole()
+        self._max_targets = 5
+        self._target_labels: dict[str, str] = {}
         self._build_connection_bar()
 
         self._meas_ts: Deque[float] = deque()
         self._last_rx: Optional[float] = None
         self._status_cache: Tuple[str, str] = ("", "")
+        self._latest_targets: dict[str, Measurement] = {}
         self._running = True
         # 자동 재연결(NFR-4): 사용자가 원한 연결이 끊기면 포트 복귀를 기다렸다 재시도
         self._want_connected = False
@@ -356,6 +370,23 @@ class RadarApp:
             on_submit=self._on_dest_mac_commit,
             on_blur=self._on_dest_mac_commit,
         )
+        self.target_fields: list[ft.TextField] = []
+        for idx in range(1, self._max_targets + 1):
+            field = ft.TextField(
+                label=f"타겟 {idx}",
+                value=str(idx),
+                width=70,
+                dense=True,
+                tooltip=f"타겟 {idx} 표시 이름",
+                on_submit=self._on_target_label_commit,
+                on_blur=self._on_target_label_commit,
+            )
+            self.target_fields.append(field)
+        self.target_wrap = ft.Column(
+            controls=self.target_fields,
+            spacing=4,
+            tight=True,
+        )
         # FR-8: ranging 시작/정지 명령 (펌웨어 미지원이면 디바이스가 no-op+로그 처리)
         self.start_btn = ft.OutlinedButton(
             "시작",
@@ -385,6 +416,7 @@ class RadarApp:
                 self.baud_dd,
                 self.fail_switch,
                 self.dest_mac_tf,
+                self.target_wrap,
                 self.start_btn,
                 self.stop_btn,
                 ft.Container(expand=True),
@@ -406,7 +438,7 @@ class RadarApp:
                         ft.Container(
                             content=self.radar,
                             expand=True,
-                            alignment=ft.alignment.center,
+                            alignment=ft.Alignment(0.5, 0.5),
                         ),
                         self.panel,
                     ],
@@ -434,6 +466,15 @@ class RadarApp:
         if isinstance(self.device, UciSerialDevice):
             self.device.set_dest_mac(self.dest_mac_tf.value or "")
 
+    def _on_target_label_commit(self, e: ft.ControlEvent) -> None:
+        """타겟 라벨 입력이 바뀌면 표시 이름을 갱신한다."""
+        self._target_labels = {}
+        for field in self.target_fields:
+            label = (field.value or "").strip()
+            if not label:
+                continue
+            self._target_labels[label] = label
+
     def _on_refresh_ports(self, e: ft.ControlEvent) -> None:
         """포트 목록 재탐색."""
         ports = self.device.list_ports()
@@ -451,6 +492,7 @@ class RadarApp:
         self.radar.hide_point()
         self._meas_ts.clear()
         self._last_rx = None
+        self._latest_targets.clear()
         port = self.port_dd.value or ""
         if not port:
             self.log.append_sys(
@@ -478,8 +520,8 @@ class RadarApp:
 
     # --- 큐 펌프 (백그라운드 스레드에서 50ms 주기, 콜백은 큐에만 쌓임) ---
 
-    def pump_loop(self) -> None:
-        """큐를 비워 화면에 반영하는 갱신 루프. 변경이 있을 때만 page.update()."""
+    async def pump_loop(self) -> None:
+        """큐를 비워 화면에 반영하는 갱신 루프. 메인 UI 루프에서 즉시 갱신한다."""
         while self._running:
             dirty = self._drain_queue()
             dirty |= self._refresh_rate()
@@ -487,7 +529,7 @@ class RadarApp:
             dirty |= self._try_reconnect()
             if dirty:
                 self.page.update()
-            time.sleep(PUMP_INTERVAL_S)
+            await asyncio.sleep(PUMP_INTERVAL_S)
 
     def shutdown(self) -> None:
         """앱 종료: 펌프 중단 + 디바이스 안전 해제 (좀비 스레드 금지)."""
@@ -516,15 +558,48 @@ class RadarApp:
         return dirty
 
     def _apply_measurement(self, m: Measurement) -> None:
-        """측정 1건을 레이더·수치 패널에 반영한다. angle 없으면 점 숨김(N/A)."""
+        """측정 1건을 레이더·수치 패널에 반영한다. 다중 타겟이면 최대 5개까지 동시 표시한다."""
         warn = is_out_of_range(m)
+        target_key = m.target_id or "default"
         if m.dist_cm is not None and m.angle_deg is not None:
-            self.radar.update_point(m.dist_cm, m.angle_deg, warn)
+            self._latest_targets[target_key] = m
+            self._trim_targets()
+            points = [
+                (
+                    t.dist_cm if t.dist_cm is not None else 0,
+                    t.angle_deg if t.angle_deg is not None else 0,
+                    is_out_of_range(t),
+                    self._target_label(t.target_id),
+                )
+                for t in list(self._latest_targets.values())
+                if t.dist_cm is not None and t.angle_deg is not None
+            ]
+            if points:
+                self.radar.update_points(points)
+            else:
+                self.radar.hide_point()
         else:
             self.radar.hide_point()
-        self.panel.set_measurement(m, warn)
+        self.panel.set_measurement(m, warn, self._target_label(m.target_id))
         self._last_rx = m.ts
         self._meas_ts.append(m.ts)
+
+    def _trim_targets(self) -> None:
+        """최대 타겟 수를 초과한 오래된 항목부터 정리한다."""
+        if len(self._latest_targets) <= self._max_targets:
+            return
+        ordered = sorted(
+            self._latest_targets.items(),
+            key=lambda item: item[1].ts,
+            reverse=True,
+        )
+        self._latest_targets = dict(ordered[: self._max_targets])
+
+    def _target_label(self, target_id: Optional[str]) -> Optional[str]:
+        """타겟 ID를 사용자 지정 라벨로 바꿔 화면에 표시한다."""
+        if target_id is None:
+            return None
+        return self._target_labels.get(target_id, target_id)
 
     def _refresh_rate(self) -> bool:
         """최근 1초 창의 측정 건수 = 수신율(건/초)."""
@@ -591,8 +666,8 @@ def main(page: ft.Page) -> None:
 
     app = RadarApp(page)
     page.add(app.build())
-    # 콜백은 백그라운드에서 큐에만 쌓이고, 이 펌프가 50ms마다 꺼내 그린다.
-    page.run_thread(app.pump_loop)
+    # 콜백은 큐에만 쌓이고, 메인 UI 루프의 태스크가 50ms마다 꺼내 그린다.
+    page.run_task(app.pump_loop)
     page.on_disconnect = lambda e: app.shutdown()
 
 

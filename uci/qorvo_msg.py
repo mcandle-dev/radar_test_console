@@ -1,8 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 Qorvo US, Inc.
 # SPDX-License-Identifier: LicenseRef-QORVO-2
-#
-# Vendored from: https://github.com/sasodoma/uwb-ranging @ commit aad72a0
-#   (path: new_python_script/uci/qorvo_msg.py) — Qorvo DW3_QM33_SDK UCI 라이브러리 사본, 무수정.
 
 """
 This library is handling Qorvo UCI data format and conversion
@@ -402,7 +399,7 @@ class RangingTwrData:
         return f"""        # Measurement {self.meas_n}:
             status:             {self.status.name} ({hex(self.status.value)})
             mac address:        {self.mac_add} hex
-            is nlos meas:       {self.nlos.name}
+            is nlos meas:       Unsupported
             distance:           {self.distance} cm
             AoA azimuth:        {self.aoa_tetha} deg
             AoA az. FOM:        {self.aoa_tetha_fom} %
@@ -463,7 +460,7 @@ class RangingOwrAoaData:
         return f"""        # Measurement {self.meas_n}:
             status:             {self.status.name} ({hex(self.status.value)})
             mac address:        {self.mac_add} hex
-            is nlos meas:       {self.nlos.name}
+            is nlos meas:       Unsupported
             frame sequence num: {self.frame_sequence_number}
             bloc idx:           {self.block_index}
             AoA azimuth:        {self.aoa_azimuth} deg
@@ -536,7 +533,7 @@ class RangingOwrUltdoaData:
             mac address:        {self.mac_add} hex
             message control:    {self.msg_control}
             frame type:         {'UT-tag' if self.frame_type==0 else 'UT-Synchronization' if self.frame_type==1 else 'na'}
-            is nlos meas:       {self.nlos.name}
+            is nlos meas:       Unsupported
             AoA azimuth:        {self.aoa_tetha} deg
             AoA az. FOM:        {self.aoa_tetha_fom} %
             AoA elevation:      {self.aoa_phi} deg
@@ -668,7 +665,7 @@ class RangingOwrDltdoaData:
             message control:    {self.msg_control}
             block index:        {self.block_idx}
             round index:        {self.round_idx}
-            is nlos meas:       {self.nlos.name}
+            is nlos meas:       Unsupported
             AoA azimuth:        {self.aoa_tetha} deg
             AoA az. FOM:        {self.aoa_tetha_fom} %
             AoA elevation:      {self.aoa_phi} deg

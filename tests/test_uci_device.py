@@ -239,6 +239,18 @@ def test_range_data_ntf_reports_distance_with_no_angle() -> None:
     assert m.ts == pytest.approx(time.time(), abs=5.0)
 
 
+def test_range_data_ntf_uses_mac_address_as_target_id() -> None:
+    h = Harness()
+    tr = h.connect()
+    h.device.start_ranging()
+    h.wait_worker()
+
+    tr.inject_ntf(0x02, 0x00, make_twr_range_ntf(dist_cm=85))
+
+    assert len(h.measurements) == 1
+    assert h.measurements[0].target_id == "5f:dd"
+
+
 def test_range_data_ntf_with_failed_measurement_logs_only() -> None:
     h = Harness()
     tr = h.connect()

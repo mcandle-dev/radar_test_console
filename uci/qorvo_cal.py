@@ -1,8 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 Qorvo US, Inc.
 # SPDX-License-Identifier: LicenseRef-QORVO-2
-#
-# Vendored from: https://github.com/sasodoma/uwb-ranging @ commit aad72a0
-#   (path: new_python_script/uci/qorvo_cal.py) — Qorvo DW3_QM33_SDK UCI 라이브러리 사본, 무수정.
 
 """
 This library is handling Qorvo calibration parameters conversion & serialization
@@ -430,9 +427,9 @@ class PhyFrame:
         """
         Update internals from  as a 3 byte int field coded as below:
         | sts_len     | sts_n       |  phr_rate | data_rate  | psr       | sfd       | prf |
-        | #23-#16 (4) | #15-#13 (3) | #12       | #11-#8 (4) | #7-#4 (4) | #3-#1 (3) | #0  |
+        | #23-#16 (8) | #15-#13 (3) | #12       | #11-#8 (4) | #7-#4 (4) | #3-#1 (3) | #0  |
         """
-        self._sts_len = sts_len((value >> 16) & (2**4 - 1))
+        self._sts_len = sts_len((value >> 16) & (2**8 - 1))
         self._sts_n = sts_n((value >> 13) & (2**3 - 1))
         self._phr = phr((value >> 12) & (2**1 - 1))
         self._data = data((value >> 8) & (2**4 - 1))
@@ -444,7 +441,7 @@ class PhyFrame:
         """
         Return as a 3 byte int coded as below:
         | sts_len     | sts_n       |  phr_rate | data_rate  | psr       | sfd       | prf |
-        | #23-#16 (4) | #15-#13 (3) | #12       | #11-#8 (4) | #7-#4 (4) | #3-#1 (3) | #0  |
+        | #23-#16 (8) | #15-#13 (3) | #12       | #11-#8 (4) | #7-#4 (4) | #3-#1 (3) | #0  |
         """
         return (
             (self._sts_len.value << 16)
@@ -596,7 +593,9 @@ class CalibrationParams(DynIntEnum):
     DualRxAutoRssiDiffRes = 0x45
     DualRxAutoErrorRateThres = 0x46
     MinInactiveDuration = 0x47
+    RssiOffSetQ3 = 0x4F
     DebugPllCfg = 0x51
+    DebugPllBiasTrim = 0x51
     ByPassDelayOffset = 0x52
     # use for new antenna management
     Transceiver = 0x70
@@ -617,6 +616,7 @@ class CalibrationParams(DynIntEnum):
     PdoaOffset = 0x86
     IpStsSanityThresQ2 = 0x87
     Pa = 0x88
+    PdoaIntervalShift = 0x89
 
 
 CalibrationParams.defs = [
@@ -629,6 +629,11 @@ CalibrationParams.defs = [
     (CalibrationParams.Axis, 1, r"ant_pair\d+\.axis$"),
     (CalibrationParams.PdoaLutId, 1, r"ant_pair\d+\.ch\d+\.pdoa.lut_id$"),
     (CalibrationParams.PdoaOffset, 2, r"ant_pair\d+\.ch\d+\.pdoa.offset$"),
+    (
+        CalibrationParams.PdoaIntervalShift,
+        2,
+        r"ant_pair\d+\.ch\d+\.pdoa.interval_shift$",
+    ),
     (CalibrationParams.TxAntPath, 1, r"ant_set\d+\.tx_ant_path$"),
     (CalibrationParams.NbRxAnts, 1, r"ant_set\d+\.nb_rx_ants$"),
     (CalibrationParams.RxAnts, 3, r"ant_set\d+\.rx_ants$"),
@@ -678,7 +683,7 @@ CalibrationParams.defs = [
     ),
     (CalibrationParams.PgCount, 1, r"ant\d+\.ch\d+\.pg_count$"),
     (CalibrationParams.PgDelay, 1, r"ant\d+\.ch\d+\.pg_delay$"),
-    (CalibrationParams.PdoaOffs, 2, r"ant_pair\d+\.ch\d+\.pdoa.axis[xyz].offset$"),
+    (CalibrationParams.RssiOffSetQ3, 1, r"ant\d+\.ch\d+\.rssi_offset_q3$"),
     (CalibrationParams.PdoaLut, 124, r"pdoa_lut\d+\.data$"),
     (CalibrationParams.PllLockingCode, 1, r"ch\d+\.pll_locking_code$"),
     (CalibrationParams.TemperatureReference, 1, r"temperature_reference$"),
@@ -687,6 +692,7 @@ CalibrationParams.defs = [
     (CalibrationParams.RfNoiseOffset, 1, r"rf_noise_offset$"),
     (CalibrationParams.IpStsSanityThresQ2, 1, r"ip_sts_sanity_thres_q2"),
     (CalibrationParams.DebugPllCfg, 4, r"debug.pll_cfg$"),
+    (CalibrationParams.DebugPllBiasTrim, 1, r"debug.pll_bias_trim$"),
 ]
 
 
@@ -739,11 +745,13 @@ cal_params_in = (
     (dot("ant_pair", pair_id, ".axis"), Uint8),
     (dot("ant_pair", pair_id, ".ch", [5, 9], ".pdoa.lut_id"), Int8),
     (dot("ant_pair", pair_id, ".ch", [5, 9], ".pdoa.offset"), S4_11),
-    (dot("ant_set", set_id, ".tx_ant_path"), Int8),
+    (dot("ant_pair", pair_id, ".ch", [5, 9], ".pdoa.interval_shift"), S4_11),
+    (dot("ant_set", set_id, ".tx_ant_path"), Uint8),
     (dot("ant_set", set_id, ".nb_rx_ants"), Uint8),
-    (dot("ant_set", set_id, ".rx_ants"), Int24),
+    (dot("ant_set", set_id, ".rx_ants"), Uint24),
     (dot("ant_set", set_id, ".rx_ants_are_pairs"), Int8),
     (["debug.pll_cfg"], Uint32),
+    (["debug.pll_bias_trim"], Uint8),
     (["wifi_sw_cfg"], Uint8),
     (dot("ch", [5, 9], ".wifi_coex_enabled"), Uint8),
     (["wifi_coex_mode", "wifi_coex_time_gap"], Uint8),
@@ -804,6 +812,7 @@ cal_params_in = (
     (dot("ant", ant_id, ".ch", [5, 9], ".pa_gain_offset"), Int8),
     (dot("ant", ant_id, ".ch", [5, 9], ".pg_count"), Int8),
     (dot("ant", ant_id, ".ch", [5, 9], ".pg_delay"), Int8),
+    (dot("ant", ant_id, ".ch", [5, 9], ".rssi_offset_q3"), Int8),
     (dot("pdoa_lut", pdoa_lut_ids, ".data"), AoaTable),
     (dot("ch", [5, 9], ".pll_locking_code"), Uint8),
     (["xtal_trim", "temperature_reference"], Uint8),

@@ -1,15 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 Qorvo US, Inc.
 # SPDX-License-Identifier: LicenseRef-QORVO-2
-#
-# Vendored from: https://github.com/sasodoma/uwb-ranging @ commit aad72a0
-#   (path: new_python_script/uci/qorvo.py) — Qorvo DW3_QM33_SDK UCI 라이브러리 사본, 무수정.
 
 """
 This library contains the Qorvo vendor UCI customization.
 """
 
 from . import qorvo_cal
-from . import qorvo_msg
 
 import enum
 import re
@@ -25,6 +21,8 @@ from .utils import *
 from .qorvo_cal import *
 from .qorvo_app import *
 from .qorvo_msg import *
+
+from . import qorvo_msg
 
 __all__ = []
 __all__.extend(qorvo_cal.__all__)
@@ -162,8 +160,6 @@ TestDsTwr.defs = [
 
 class Config(DynIntEnum):
     ChannelNumber = 0xA0
-    Traces = 0xA8
-    PmMinInactivityS4 = 0xA9
 
 
 fira.Config.extend(Config)
@@ -171,8 +167,6 @@ fira.Config.extend(Config)
 fira.Config.defs.extend(
     [
         (Config.ChannelNumber, 1),
-        (Config.Traces, 4),
-        (Config.PmMinInactivityS4, 4),
     ]
 )
 
@@ -180,16 +174,6 @@ fira.config_params.update(
     {
         # Enum Value,               parameter type, Read Only, description)
         Config.ChannelNumber: (Int8, 0, "get/set current used channel. 5 or 9."),
-        Config.Traces: (
-            Int32,
-            0,
-            "bitfield to enable traces: 1 mcps, 2 fira, 4 lld, 8 lldd, x10 lldc, x20 pctt, x40 radar, x80 ccc.",
-        ),
-        Config.PmMinInactivityS4: (
-            Int32,
-            0,
-            "get/set minimum inactivity time prior triggering a S4. in ms.",
-        ),
     }
 )
 

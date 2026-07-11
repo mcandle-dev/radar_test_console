@@ -55,6 +55,13 @@ class TestMeasurement:
         assert r.measurement.dist_cm == 85
         assert r.measurement.angle_deg == -12
 
+    def test_target_id_field(self) -> None:
+        """TARGET/ID 필드가 있으면 타겟 식별 정보를 보존한다."""
+        r = parse_line("DIST:85,ANGLE:-12,TARGET:2", ts=FIXED_TS)
+        assert r.kind == "measurement"
+        assert r.measurement is not None
+        assert r.measurement.target_id == "2"
+
 
 class TestInvalid:
     """깨진 라인 — 앱을 죽이지 말고 원문·사유를 보존 (NFR-5)."""

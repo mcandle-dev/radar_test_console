@@ -1,4 +1,5 @@
-flet==0.28.3
+flet==0.85.3
+flet-desktop==0.85.3
 pyserial==3.5
 pytest==8.4.1
 colorama==0.4.6  # vendored uci/ (Qorvo UCI 라이브러리)가 요구

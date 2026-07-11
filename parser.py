@@ -77,7 +77,14 @@ def _parse_measurement(fields: Dict[str, str], raw: str, ts: float) -> ParseResu
         if angle_deg is None:
             return _invalid(raw, f"ANGLE is not an integer: {fields['ANGLE']!r}", ts)
 
-    measurement = Measurement(dist_cm=dist_cm, angle_deg=angle_deg, raw=raw, ts=ts)
+    target_id = fields.get("TARGET") or fields.get("ID")
+    measurement = Measurement(
+        dist_cm=dist_cm,
+        angle_deg=angle_deg,
+        raw=raw,
+        ts=ts,
+        target_id=target_id,
+    )
     return ParseResult("measurement", measurement, None, raw, None, ts)
 
 
@@ -118,7 +125,13 @@ def _parse_json_line(raw: str, ts: float) -> ParseResult:
                 raw, f"LAoA_deg is not a number: {entry[JSON_ANGLE_KEY]!r}", ts
             )
 
-    measurement = Measurement(dist_cm=dist_cm, angle_deg=angle_deg, raw=raw, ts=ts)
+    measurement = Measurement(
+        dist_cm=dist_cm,
+        angle_deg=angle_deg,
+        raw=raw,
+        ts=ts,
+        target_id=None,
+    )
     return ParseResult("measurement", measurement, None, raw, None, ts)
 
 
