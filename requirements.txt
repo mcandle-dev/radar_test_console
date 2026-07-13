@@ -3,6 +3,7 @@ flet-desktop==0.85.3
 pyserial==3.5
 pytest==8.4.1
 colorama==0.4.6  # vendored uci/ (Qorvo UCI 라이브러리)가 요구
+bleak==3.0.2     # BLE OOB central (사양서 v0.2) — ble_oob.py 계층 전용
 
 # 개발 도구 (코드 품질 — 코딩가이드 7.1)
 ruff==0.15.20

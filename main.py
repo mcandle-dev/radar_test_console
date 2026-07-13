@@ -14,7 +14,18 @@ from typing import Deque, NamedTuple, Optional, Sequence, Tuple
 import flet as ft
 
 import uci_params
+from ble_oob import (
+    OOB_LOG_PREFIX,
+    REASON_BLE_CONN_FAIL,
+    REASON_OOB_PARSE,
+    BleakOobClient,
+    BleOobClient,
+    OobPeripheral,
+    SimulatorOobClient,
+    is_bleak_available,
+)
 from models import DeviceEvent, Measurement, SessionState
+from oob_parser import OobParseResult
 from parser import is_out_of_range, parse_line
 from radar_device import (
     LINK_LOG_PREFIX,
@@ -27,7 +38,7 @@ from radar_device import (
 from radar_view import RadarTarget, RadarView
 
 # 보드가 없으면 시뮬레이터(True), 있으면 실물(False). 이 한 줄만 바꾸면 된다.
-USE_SIMULATOR = False
+USE_SIMULATOR = True
 # 실물 모드에서: UCI 펌웨어(DW3_QM33 SDK UCI)면 True, CLI 텍스트 펌웨어면 False.
 USE_UCI = True
 
@@ -63,6 +74,20 @@ COL_ANGLE_W = 46
 COL_RATE_W = 62
 COL_LAST_RX_W = 64
 COL_STATUS_W = 56
+
+# 연결 방식 (FR-OOB-0) — 기본 수동. OOB는 부가 경로: BLE 실패가 수동 흐름을 막지 않는다.
+MODE_MANUAL = "manual"
+MODE_OOB = "oob"
+OOB_FAIL_NONE = "없음"
+OOB_FAIL_SESSION_MISMATCH = (
+    "SESSION_MISMATCH"  # 시뮬 전용: SessionID 불일치 재현 (검수 5)
+)
+OOB_FAIL_OPTIONS = (
+    OOB_FAIL_NONE,
+    REASON_BLE_CONN_FAIL,
+    REASON_OOB_PARSE,
+    OOB_FAIL_SESSION_MISMATCH,
+)
 
 TIMELINE_STAGES = (
     SessionState.SLEEP,
@@ -338,6 +363,8 @@ class LogConsole(ft.Container):
             return ft.Colors.CYAN_300, "→ 전송"
         if raw.startswith(UCI_LOG_PREFIX):  # UCI 프로토콜 정보 (파싱 대상 아님)
             return ft.Colors.PURPLE_200, "ⓘ UCI"
+        if raw.startswith(OOB_LOG_PREFIX):  # BLE OOB 계층 정보 (파싱 대상 아님)
+            return ft.Colors.TEAL_200, "ⓘ OOB"
         result = parse_line(raw)
         if result.kind == "measurement":
             return ft.Colors.GREY_300, "✔ 파싱 OK"
@@ -378,6 +405,15 @@ class RadarApp:
         self.panel = TargetPanel()
         self.log = LogConsole()
         self._build_connection_bar()
+        self._build_oob_bar()
+
+        # OOB 자동 모드 (FR-OOB-0~8): 클라이언트는 OOB 진입 시에만 생성 — 수동은 BLE 미실행
+        self.oob_client: Optional[BleOobClient] = None
+        self._oob_mode = False
+        self._oob_found: list[OobPeripheral] = []
+        self._oob_address: Optional[str] = None
+        self._pending_session_id: Optional[int] = None
+        self._ranging = False
 
         self._meas_ts: Deque[float] = deque()
         self._last_rx: Optional[float] = None
@@ -442,7 +478,7 @@ class RadarApp:
         self.stop_btn = ft.OutlinedButton(
             "정지",
             tooltip="STOP 전송 (FR-8)",
-            on_click=lambda e: self.device.stop_ranging(),
+            on_click=self._on_stop_click,
         )
         self.led = ft.Container(
             width=14, height=14, border_radius=7, bgcolor=COLOR_IDLE
@@ -472,11 +508,88 @@ class RadarApp:
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
+    def _build_oob_bar(self) -> None:
+        """연결 방식 세그먼트 + OOB 컨트롤 행 (FR-OOB-0, 변경요구서 §1a 목업 2행)."""
+        self.mode_seg = ft.SegmentedButton(
+            segments=[
+                ft.Segment(value=MODE_MANUAL, label=ft.Text("수동 입력")),
+                ft.Segment(value=MODE_OOB, label=ft.Text("OOB 자동")),
+            ],
+            selected={MODE_MANUAL},  # 기본 수동 — 검증된 경로를 회귀 기준으로 보존
+            on_change=self._on_mode_change,
+            tooltip="수동=기존 방식(기본) / OOB=BLE로 폰 주소 자동 수신. 레인징 중 전환 불가",
+        )
+        self._build_oob_controls()
+        self.oob_bar = ft.Row(
+            controls=[
+                ft.Text("연결 방식"),
+                self.mode_seg,
+                self.oob_scan_btn,
+                self.oob_list_dd,
+                self.oob_led,
+                self.oob_status,
+                self.autostart_sw,
+                self.oob_addr_change_btn,
+                self.oob_fail_dd,
+                ft.Container(expand=True),
+                self.oob_warn,
+                self.session_update_btn,
+            ],
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+    def _build_oob_controls(self) -> None:
+        """OOB 모드 전용 위젯들 (기본 숨김 — 수동 모드 화면은 현행과 동일)."""
+        self.oob_scan_btn = ft.OutlinedButton(
+            "OOB 스캔",
+            tooltip="Service UUID 필터 스캔 → 주소 자동 수신 (FR-OOB-1). 실패 시 재시도",
+            visible=False,
+            on_click=self._on_oob_scan_click,
+        )
+        self.oob_list_dd = ft.Dropdown(
+            width=250,
+            label="발견 목록",
+            visible=False,
+            on_change=self._on_oob_list_select,
+        )
+        self.oob_led = ft.Container(
+            width=10, height=10, border_radius=5, bgcolor=COLOR_IDLE, visible=False
+        )
+        self.oob_status = ft.Text("", size=12, visible=False)
+        self.autostart_sw = ft.Switch(
+            label="자동 시작",
+            value=False,  # 기본 OFF — 브링업 단계별 관찰 원칙 (FR-OOB-5)
+            visible=False,
+            tooltip="ON이면 주소 수신 즉시 start_ranging (FR-OOB-5)",
+        )
+        self.oob_addr_change_btn = ft.TextButton(
+            "주소 변경 재현",
+            tooltip="폰 Stop→재Start(주소 재발급) Notify 재현 — 시뮬 전용",
+            visible=False,
+            on_click=self._on_addr_change_click,
+        )
+        self.oob_fail_dd = ft.Dropdown(
+            width=200,
+            label="BLE 실패 재현",
+            options=[ft.dropdown.Option(o) for o in OOB_FAIL_OPTIONS],
+            value=OOB_FAIL_NONE,
+            visible=False,
+            on_change=self._on_oob_fail_change,
+        )
+        self.oob_warn = ft.Text("", color=COLOR_WARN, size=12, visible=False)
+        self.session_update_btn = ft.TextButton(
+            "수신값으로 갱신",
+            tooltip="콘솔 SESSION_ID를 수신값으로 교체 (FR-OOB-4)",
+            visible=False,
+            on_click=self._on_session_update_click,
+        )
+
     def build(self) -> ft.Control:
-        """6.1 레이아웃: 연결바 / 타임라인 / (레이더|수치) / 로그."""
+        """6.1 레이아웃: 연결바 / OOB바 / 타임라인 / (레이더|수치) / 로그."""
         return ft.Column(
             controls=[
                 self.connection_bar,
+                self.oob_bar,
                 self.timeline,
                 ft.Row(
                     controls=[
@@ -519,6 +632,259 @@ class RadarApp:
             self.port_dd.value = ports[0] if ports else None
         self.page.update()
 
+    def _on_stop_click(self, e: ft.ControlEvent) -> None:
+        """정지 버튼: STOP 전송 + 레인징 플래그 해제 (모드 전환 재허용)."""
+        self.device.stop_ranging()
+        self._set_ranging(False)
+        self.page.update()
+
+    def _set_ranging(self, ranging: bool) -> None:
+        """레인징 여부를 기록하고, 레인징 중에는 연결 방식 전환을 막는다 (FR-OOB-0)."""
+        self._ranging = ranging
+        self.mode_seg.disabled = ranging
+
+    # --- 연결 방식 전환 (FR-OOB-0) ---
+
+    def _on_mode_change(self, e: ft.ControlEvent) -> None:
+        """수동/OOB 세그먼트 전환. 레인징 중이면 되돌린다."""
+        want_oob = MODE_OOB in (self.mode_seg.selected or set())
+        if want_oob == self._oob_mode:
+            return
+        if self._ranging:
+            self.mode_seg.selected = {MODE_OOB if self._oob_mode else MODE_MANUAL}
+            self.log.append_sys(
+                "레인징 중에는 연결 방식을 바꿀 수 없습니다 — 정지 후 전환"
+            )
+        elif want_oob:
+            if not self._enter_oob_mode():
+                self.mode_seg.selected = {MODE_MANUAL}
+        else:
+            self._exit_oob_mode()
+        self.page.update()
+
+    def _enter_oob_mode(self) -> bool:
+        """OOB 모드 진입: 클라이언트 준비 + 주소 입력칸 잠금 + OOB 컨트롤 노출."""
+        client = self.oob_client or self._create_oob_client()
+        if client is None:
+            self.log.append_sys(
+                "BLE(bleak) 사용 불가 — 수동 모드를 유지합니다 (pip install -r requirements.txt)"
+            )
+            return False
+        self.oob_client = client
+        self._oob_mode = True
+        self.dest_mac_tf.read_only = True  # 읽기전용 + 자동 반영 (FR-OOB-3)
+        self.dest_mac_tf.visible = True
+        self.dest_mac_tf.label = "폰 주소 (자동 🔒)"
+        self._set_oob_controls_visible(True)
+        self._set_oob_status("대기 — [OOB 스캔]으로 폰 검색", COLOR_IDLE)
+        self.log.append_sys("연결 방식: OOB 자동 — 폰 앱을 Start한 뒤 [OOB 스캔]")
+        return True
+
+    def _exit_oob_mode(self) -> None:
+        """수동 모드 복귀: BLE 연결 해제 + 현행 화면·동작 그대로 (회귀 없음)."""
+        if self.oob_client is not None:
+            self.oob_client.disconnect()  # UWB 세션에는 영향 없음 (BLE는 OOB 전용)
+        self._oob_mode = False
+        self.dest_mac_tf.read_only = False
+        self.dest_mac_tf.visible = isinstance(self.device, UciSerialDevice)
+        self.dest_mac_tf.label = "폰 주소"
+        self._set_oob_controls_visible(False)
+        self.log.append_sys("연결 방식: 수동 입력 (기존 방식)")
+
+    def _create_oob_client(self) -> Optional[BleOobClient]:
+        """OOB 클라이언트 생성 + 콜백→큐 배선. BLE 불가면 None → 수동 경로 유지."""
+        client = self._new_oob_client()
+        if client is None:
+            return None
+        client.on_scan_result = lambda found: self.events.put(("oob_scan", found))
+        client.on_oob_info = lambda r: self.events.put(("oob_info", r))
+        client.on_state = lambda ev: self.events.put(("oob_state", ev))
+        client.on_disconnect = lambda reason: self.events.put(("oob_disc", reason))
+        client.on_log = lambda s: self.events.put(("oob_log", s))
+        return client
+
+    def _new_oob_client(self) -> Optional[BleOobClient]:
+        """구현 선택: 시뮬 모드=하네스, 실물=bleak. USE_SIMULATOR와 연결 방식은 직교."""
+        if USE_SIMULATOR:
+            return SimulatorOobClient(session_id=uci_params.SESSION_ID)
+        if not is_bleak_available():  # 미설치 PC에서도 앱이 죽지 않아야 한다 (FR-OOB-9)
+            return None
+        return BleakOobClient()
+
+    def _set_oob_controls_visible(self, visible: bool) -> None:
+        """OOB 컨트롤 일괄 표시/숨김. 재현 도구는 시뮬레이터 모드에서만 노출."""
+        self.oob_scan_btn.visible = visible
+        self.oob_led.visible = visible
+        self.oob_status.visible = visible
+        self.autostart_sw.visible = visible
+        self.oob_fail_dd.visible = visible and USE_SIMULATOR
+        self.oob_addr_change_btn.visible = visible and USE_SIMULATOR
+        self.oob_list_dd.visible = False  # 스캔 결과가 여러 대일 때만 켠다
+        self.oob_warn.visible = False
+        self.session_update_btn.visible = False
+
+    # --- OOB 이벤트 핸들러 (버튼=메인 스레드, _handle_*=큐 펌프 경유) ---
+
+    def _on_oob_scan_click(self, e: ft.ControlEvent) -> None:
+        """[OOB 스캔]: 이전 결과·경고를 지우고 스캔 시작 (FR-OOB-1, 재시도 겸용)."""
+        if self.oob_client is None:
+            return
+        self._oob_found = []
+        self.oob_list_dd.visible = False
+        self.oob_list_dd.options = []
+        self.oob_warn.visible = False
+        self.oob_scan_btn.disabled = True
+        self._set_oob_status("스캔 중…", COLOR_ACTIVE)
+        self.oob_client.scan()
+        self.page.update()
+
+    def _on_oob_list_select(self, e: ft.ControlEvent) -> None:
+        """발견 목록에서 폰 선택 → 연결."""
+        idx = int(self.oob_list_dd.value or 0)
+        if 0 <= idx < len(self._oob_found):
+            self._connect_oob(self._oob_found[idx])
+        self.page.update()
+
+    def _on_addr_change_click(self, e: ft.ControlEvent) -> None:
+        """주소 재발급 Notify 재현 (시뮬 전용, 검수 3)."""
+        if isinstance(self.oob_client, SimulatorOobClient):
+            self.oob_client.simulate_address_change()
+
+    def _on_oob_fail_change(self, e: ft.ControlEvent) -> None:
+        """BLE 실패 재현 선택을 시뮬 클라이언트에 반영한다 (FR-OOB-8)."""
+        client = self.oob_client
+        if not isinstance(client, SimulatorOobClient):
+            return
+        sel = self.oob_fail_dd.value or OOB_FAIL_NONE
+        client.fail_mode = (
+            sel if sel in (REASON_BLE_CONN_FAIL, REASON_OOB_PARSE) else None
+        )
+        client.session_id = (
+            uci_params.SESSION_ID + 1
+            if sel == OOB_FAIL_SESSION_MISMATCH
+            else uci_params.SESSION_ID
+        )
+        self.log.append_sys(f"BLE 실패 재현: {sel}")
+
+    def _on_session_update_click(self, e: ft.ControlEvent) -> None:
+        """SessionID를 수신값으로 갱신한다 (FR-OOB-4 — 사용자가 선택했을 때만)."""
+        if self._pending_session_id is None:
+            return
+        old = uci_params.SESSION_ID
+        uci_params.SESSION_ID = (
+            self._pending_session_id
+        )  # 가변 파라미터 (uci_params 주석)
+        self._pending_session_id = None
+        self.session_update_btn.visible = False
+        self.oob_warn.visible = False
+        self.log.append_sys(
+            f"SESSION_ID {old} → {uci_params.SESSION_ID} 갱신 (수신값 적용)"
+        )
+        self.page.update()
+
+    def _connect_oob(self, peripheral: OobPeripheral) -> None:
+        """선택된 폰에 GATT 연결을 시작한다."""
+        self._set_oob_status(f"연결 중… ({peripheral.device_id})", COLOR_ACTIVE)
+        if self.oob_client is not None:
+            self.oob_client.connect(peripheral)
+
+    def _handle_oob_scan(self, found: list) -> None:
+        """스캔 결과: 0=안내, 1=자동 선택, 다수=목록 선택 (사양서 §7-1·2)."""
+        self.oob_scan_btn.disabled = False
+        self._oob_found = list(found)
+        if not found:
+            self._set_oob_status("광고 없음", COLOR_NO_RX)
+            self.log.append_sys(
+                "광고 없음 — 폰 앱에서 Start 했는지 확인 (수동 입력 경로는 계속 유효)"
+            )
+            return
+        if len(found) == 1:
+            self._connect_oob(found[0])
+            return
+        self.oob_list_dd.options = [
+            ft.dropdown.Option(
+                key=str(i), text=f"{p.name} · {p.device_id} · {p.rssi}dBm"
+            )
+            for i, p in enumerate(found)
+        ]
+        self.oob_list_dd.visible = True
+        self._set_oob_status(f"{len(found)}대 발견 — 목록에서 선택", COLOR_ACTIVE)
+
+    def _handle_oob_state(self, event: DeviceEvent) -> None:
+        """OOB 진행 이벤트 → 타임라인 실연동 (FR-OOB-7) + 연결되면 OOB_INFO 읽기."""
+        self.timeline.apply_event(event)
+        self.panel.set_session(event)
+        if event.state == SessionState.BLE_CONN:
+            self._set_oob_status("연결됨 — OOB_INFO 수신 중", COLOR_OK)
+            if self.oob_client is not None:
+                self.oob_client.read_oob()
+        elif event.state == SessionState.OOB_DONE:
+            self._set_oob_status("연결됨 · OOB 완료", COLOR_OK)
+        elif event.state == SessionState.ERR:
+            self._set_oob_status(
+                f"실패: {event.reason or '?'} — 재스캔으로 재시도", COLOR_ERR
+            )
+
+    def _handle_oob_info(self, result: OobParseResult) -> None:
+        """OOB_INFO 수신(Read·Notify 공통): 검증 → 경고 → 주소 자동 반영."""
+        if result.kind != "ok" or result.info is None:
+            self._show_oob_warn("OOB 파싱 실패 — 로그의 raw hex 확인")  # §7-4
+            return
+        info = result.info
+        if info.version_mismatch:  # §7-6: 하드 실패 금지, 경고만
+            self._show_oob_warn(
+                f"스펙 버전 불일치(v{info.protocol_version}) — v1 규칙으로 해석함"
+            )
+        self._check_session_id(info.session_id)
+        self._apply_oob_address(info.uwb_address)
+
+    def _check_session_id(self, received: int) -> None:
+        """SessionID 교차 검증 (FR-OOB-4) — 불일치면 경고 + 갱신 선택지."""
+        if received == uci_params.SESSION_ID:
+            self._pending_session_id = None
+            self.session_update_btn.visible = False
+            return
+        self._pending_session_id = received
+        self.session_update_btn.visible = True
+        self._show_oob_warn(
+            f"SessionID 불일치: 콘솔 {uci_params.SESSION_ID} ≠ 수신 {received}"
+        )
+
+    def _apply_oob_address(self, address: str) -> None:
+        """주소 자동 반영 (FR-OOB-3) + 변경 감지 (FR-OOB-6) + 자동 시작 (FR-OOB-5)."""
+        prev = self._oob_address
+        self._oob_address = address
+        self.dest_mac_tf.value = address
+        if isinstance(self.device, UciSerialDevice):
+            self.device.set_dest_mac(address)
+        self.log.append_sys(f"폰 주소 자동 반영: {address}")
+        if prev is not None and prev != address:
+            if self._ranging:
+                self._show_oob_warn(
+                    f"주소 변경됨({prev}→{address}) — 레인징 재시작 필요"
+                )
+            else:
+                self.log.append_sys(f"주소 변경됨: {prev} → {address}")
+        if self.autostart_sw.value and not self._ranging:
+            self.log.append_sys("자동 시작: start_ranging 호출 (FR-OOB-5)")
+            self.device.start_ranging()
+
+    def _handle_oob_disconnect(self, reason: str) -> None:
+        """BLE 연결 해제 — UWB 세션은 유지 (사양서 §7-7), 표시만 갱신."""
+        self._set_oob_status(f"연결 해제됨 ({reason})", COLOR_IDLE)
+
+    def _set_oob_status(self, text: str, color: str) -> None:
+        """OOB 상태 점·텍스트 갱신."""
+        self.oob_led.bgcolor = color
+        self.oob_status.value = text
+        self.oob_status.color = color
+
+    def _show_oob_warn(self, text: str) -> None:
+        """OOB 경고 표시 (무증상 실패 방어 — 로그에도 남긴다)."""
+        self.oob_warn.value = f"⚠ {text}"
+        self.oob_warn.visible = True
+        self.log.append_sys(f"경고: {text}")
+
     def _connect(self) -> None:
         """표시 상태를 초기화하고 디바이스 수신을 시작한다."""
         if isinstance(self.device, SimulatorDevice):
@@ -549,6 +915,7 @@ class RadarApp:
         """디바이스를 안전 종료하고 화면을 미연결 상태로 되돌린다."""
         self._want_connected = False  # 사용자가 원한 해제 — 자동 재연결 중단
         self.device.disconnect()
+        self._set_ranging(False)
         self.connect_btn.text = "연결"
         self._reset_targets()
         self.panel.reset_values()
@@ -577,9 +944,11 @@ class RadarApp:
             await asyncio.sleep(PUMP_INTERVAL_S)
 
     def shutdown(self) -> None:
-        """앱 종료: 펌프 중단 + 디바이스 안전 해제 (좀비 스레드 금지)."""
+        """앱 종료: 펌프 중단 + 디바이스·OOB 안전 해제 (좀비 스레드 금지)."""
         self._running = False
         self.device.disconnect()
+        if self.oob_client is not None:
+            self.oob_client.close()  # GATT 해제 + BLE 루프 스레드 종료
 
     def _drain_queue(self) -> bool:
         """콜백이 쌓아 둔 이벤트를 전부 꺼내 위젯에 반영한다."""
@@ -589,18 +958,41 @@ class RadarApp:
                 kind, data = self.events.get_nowait()
             except queue.Empty:
                 break
-            if kind == "meas" and isinstance(data, Measurement):
-                self._apply_measurement(data)
-            elif kind == "state" and isinstance(data, DeviceEvent):
-                self.timeline.apply_event(data)
-                self.panel.set_session(data)
-            elif kind == "log" and isinstance(data, str):
-                # STATE 라인 등 모든 RX도 '수신'으로 취급 (워치독은 진짜 침묵만 잡는다)
-                if not data.startswith(("TX", LINK_LOG_PREFIX)):
-                    self._last_rx = time.time()
-                self.log.append_rx(data)
+            self._dispatch(kind, data)
             dirty = True
         return dirty
+
+    def _dispatch(self, kind: str, data: object) -> None:
+        """디바이스 이벤트 1건을 종류별로 반영한다 (OOB 계열은 _dispatch_oob로)."""
+        if kind == "meas" and isinstance(data, Measurement):
+            self._apply_measurement(data)
+        elif kind == "state" and isinstance(data, DeviceEvent):
+            self.timeline.apply_event(data)
+            self.panel.set_session(data)
+            if data.state == SessionState.RANGING:
+                self._set_ranging(True)
+            elif data.state in (SessionState.ERR, SessionState.SLEEP):
+                self._set_ranging(False)
+        elif kind == "log" and isinstance(data, str):
+            # STATE 라인 등 모든 RX도 '수신'으로 취급 (워치독은 진짜 침묵만 잡는다)
+            if not data.startswith(("TX", LINK_LOG_PREFIX)):
+                self._last_rx = time.time()
+            self.log.append_rx(data)
+        else:
+            self._dispatch_oob(kind, data)
+
+    def _dispatch_oob(self, kind: str, data: object) -> None:
+        """OOB 이벤트 1건 반영. OOB 로그는 UART 수신 워치독에 잡히지 않게 분리."""
+        if kind == "oob_scan" and isinstance(data, list):
+            self._handle_oob_scan(data)
+        elif kind == "oob_state" and isinstance(data, DeviceEvent):
+            self._handle_oob_state(data)
+        elif kind == "oob_info" and isinstance(data, OobParseResult):
+            self._handle_oob_info(data)
+        elif kind == "oob_log" and isinstance(data, str):
+            self.log.append_rx(data)  # _last_rx 갱신 없음 — BLE는 UART 수신이 아님
+        elif kind == "oob_disc" and isinstance(data, str):
+            self._handle_oob_disconnect(data)
 
     def _apply_measurement(self, m: Measurement) -> None:
         """측정 1건을 타겟별 최신값·수신율 창에 반영한다 (그리기는 _refresh_targets)."""
