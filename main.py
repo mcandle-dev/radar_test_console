@@ -9,7 +9,7 @@ import queue
 import time
 from collections import deque
 from pathlib import Path
-from typing import Deque, NamedTuple, Optional, Sequence, Tuple
+from typing import Deque, Dict, NamedTuple, Optional, Sequence, Tuple
 
 import flet as ft
 
@@ -79,6 +79,7 @@ COLOR_NO_RX = ft.Colors.GREY_500  # 수신없음 = 회색 (요구사항정의서
 COLOR_ERR = ft.Colors.RED_400
 COLOR_WARN = ft.Colors.ORANGE_400
 COLOR_TEXT_DIM = ft.Colors.GREY_400
+COLOR_PRIMARY_TARGET = ft.Colors.RED_ACCENT_400  # 최근접·최대RSSI 타겟 강조색
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +143,7 @@ class TargetRow(NamedTuple):
     label: str
     dist_cm: Optional[int]
     angle_deg: Optional[int]
+    rssi_dbm: Optional[float]
     warn: bool
     rate: int
     last_rx: str
@@ -212,7 +214,8 @@ class TargetPanel(ft.Container):
         )
         dist_text = "—" if r.dist_cm is None else f"{r.dist_cm} cm"
         angle_text = "N/A" if r.angle_deg is None else f"{r.angle_deg}°"
-        detail = f"각도 {angle_text} · {r.rate} 건/초 · {r.last_rx}"
+        rssi_text = "N/A" if r.rssi_dbm is None else f"{r.rssi_dbm:g} dBm"
+        detail = f"각도 {angle_text} · RSSI {rssi_text} · {r.rate} 건/초 · {r.last_rx}"
         if r.stale:
             detail += " · 수신없음"
         name = ft.Text(r.label, size=13, weight=ft.FontWeight.BOLD, color=name_color)
@@ -360,6 +363,29 @@ class LogConsole(ft.Container):
         hist_overflow = len(self._history) - LOG_HISTORY_MAX
         if hist_overflow > 0:
             del self._history[:hist_overflow]
+
+
+def select_primary_target(
+    targets: Dict[str, Measurement], now: float, timeout_s: float
+) -> Optional[str]:
+    """대표 타겟 키를 고른다: 거리 최소 우선, 동률이면 RSSI 최대 우선.
+
+    거리 미확보(dist_cm=None) 또는 무수신 타임아웃을 넘긴 타겟은 후보에서 제외한다.
+    """
+    candidates = [
+        (key, m)
+        for key, m in targets.items()
+        if m.dist_cm is not None and (now - m.ts) <= timeout_s
+    ]
+    if not candidates:
+        return None
+
+    def rank(item: Tuple[str, Measurement]) -> Tuple[int, float]:
+        _, m = item
+        rssi = m.rssi_dbm if m.rssi_dbm is not None else float("-inf")
+        return (m.dist_cm, -rssi)  # 거리 오름차순, 동률이면 RSSI 내림차순
+
+    return min(candidates, key=rank)[0]
 
 
 class RadarApp:
@@ -647,10 +673,11 @@ class RadarApp:
     def _refresh_targets(self) -> bool:
         """타겟 테이블·레이더를 최신 스냅숏으로 갱신한다. 변경이 있으면 True."""
         now = time.time()
+        primary_key = self._primary_target_key(now)
         rows: list[TargetRow] = []
         radar_targets: list[RadarTarget] = []
         for key, m in self._latest_targets.items():
-            row, radar = self._snapshot_target(key, m, now)
+            row, radar = self._snapshot_target(key, m, now, key == primary_key)
             rows.append(row)
             if radar is not None:
                 radar_targets.append(radar)
@@ -662,18 +689,27 @@ class RadarApp:
             dirty = True
         return dirty
 
+    def _primary_target_key(self, now: float) -> Optional[str]:
+        """최근접(거리 최소) 타겟을 고르고, 거리가 같으면 RSSI가 큰 쪽을 우선한다."""
+        return select_primary_target(self._latest_targets, now, RX_TIMEOUT_S)
+
     def _snapshot_target(
-        self, key: str, m: Measurement, now: float
+        self, key: str, m: Measurement, now: float, is_primary: bool
     ) -> Tuple[TargetRow, Optional[RadarTarget]]:
         """타겟 1개의 테이블 행과 레이더 표시(없으면 None) 스냅숏을 만든다."""
         stale = (now - m.ts) > RX_TIMEOUT_S  # 타겟별 수신없음 → 회색 행 + 레이더 제외
         warn = is_out_of_range(m)
-        color = self._target_colors.get(key, TARGET_COLORS[0])
+        color = (
+            COLOR_PRIMARY_TARGET
+            if is_primary
+            else self._target_colors.get(key, TARGET_COLORS[0])
+        )
         label = key if m.target_id else DEFAULT_TARGET_LABEL
         row = TargetRow(
             label=label,
             dist_cm=m.dist_cm,
             angle_deg=m.angle_deg,
+            rssi_dbm=m.rssi_dbm,
             warn=warn,
             rate=self._target_rate(key, now),
             last_rx=time.strftime("%H:%M:%S", time.localtime(m.ts)),

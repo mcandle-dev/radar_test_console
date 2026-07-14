@@ -52,7 +52,8 @@ radar_test_console/
 - 측정: `DIST:85,ANGLE:-12` — DIST=cm(0~5000), ANGLE=°(-90~+90, 0=정면, 음수=좌)
 - 키 순서/대소문자 무관. ANGLE 없으면 거리만 표시(angle=None, UI는 'N/A').
 - 세션: `STATE:<SLEEP|BLE_ADV|BLE_CONN|OOB_DONE|RANGING|ERR>` (ERR은 `,REASON:<사유>` 동반)
-- 알 수 없는 추가 필드(RSSI, Q 등)는 무시하고 파싱 성공 처리 (전방 호환).
+- `RSSI:<dBm>`은 신호 세기로 인식해 `Measurement.rssi_dbm`에 채운다(2026-07-14 확장). 그 외
+  알 수 없는 추가 필드(Q 등)는 무시하고 파싱 성공 처리 (전방 호환).
 - 깨진 라인은 앱을 죽이지 말고 `kind="invalid"` + 원문을 로그에 남길 것.
 - 범위 초과 값은 파싱 성공 처리하되 UI에서 경고색 표시.
 

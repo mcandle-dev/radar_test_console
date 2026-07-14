@@ -145,7 +145,7 @@ readline/생성 루프                    50ms 펌프 루프 (RadarApp.pump_loop
 
 ```
 DIST:85,ANGLE:-12                → 측정 (키 순서·대소문자 무관, ANGLE 없으면 N/A)
-DIST:85,ANGLE:-12,RSSI:-60       → 미지 필드는 무시 (전방 호환)
+DIST:85,ANGLE:-12,RSSI:-60       → RSSI(dBm)까지 인식, 그 외 미지 필드는 무시 (전방 호환)
 STATE:RANGING                    → 세션 이벤트 (SLEEP/BLE_ADV/BLE_CONN/OOB_DONE/RANGING/ERR)
 STATE:ERR,REASON:OOB_TIMEOUT     → 실패 + 사유
 (그 외 깨진 라인)                 → kind="invalid", 앱 무중단 + 원문 로그

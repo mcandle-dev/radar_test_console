@@ -63,6 +63,10 @@ SIM_OOB_TIMEOUT_REASON = "OOB_TIMEOUT"
 SIM_NUM_TARGETS = 3  # 다중 타겟 UI 검증용 기본 생성 수
 SIM_TARGET_DIST_SPACING_CM = 40  # 타겟별 초기 거리 간격
 SIM_TARGET_ANGLE_SPREAD_DEG = 35  # 타겟별 초기 각도 간격
+SIM_RSSI_INITIAL_DBM = -65
+SIM_RSSI_MIN_DBM = -95
+SIM_RSSI_MAX_DBM = -40
+SIM_RSSI_STEP_DBM = 2  # 랜덤 워크 1회 최대 변화량
 
 
 class RadarDevice(ABC):
@@ -194,8 +198,8 @@ class SimulatorDevice(RadarDevice):
         return True
 
     def _run_ranging_loop(self) -> None:
-        """타겟별 거리/각도 랜덤 워크를 10Hz로 생성해 콜백으로 내보낸다."""
-        dists, angles = self._initial_targets()
+        """타겟별 거리/각도/RSSI 랜덤 워크를 10Hz로 생성해 콜백으로 내보낸다."""
+        dists, angles, rssis = self._initial_targets()
         while not self._stop_event.wait(SIM_MEASUREMENT_INTERVAL_S):
             if not self._ranging_enabled:
                 continue
@@ -209,12 +213,18 @@ class SimulatorDevice(RadarDevice):
                     SIM_ANGLE_MIN_DEG,
                     SIM_ANGLE_MAX_DEG,
                 )
-                self._emit_measurement(tid, dists[tid], angles[tid])
+                rssis[tid] = _clamped_walk(
+                    rssis[tid], SIM_RSSI_STEP_DBM, SIM_RSSI_MIN_DBM, SIM_RSSI_MAX_DBM
+                )
+                self._emit_measurement(tid, dists[tid], angles[tid], rssis[tid])
 
-    def _initial_targets(self) -> tuple[dict[str, int], dict[str, int]]:
-        """타겟 ID("1"..N)별 초기 거리/각도를 서로 겹치지 않게 배치한다."""
+    def _initial_targets(
+        self,
+    ) -> tuple[dict[str, int], dict[str, int], dict[str, int]]:
+        """타겟 ID("1"..N)별 초기 거리/각도/RSSI를 서로 겹치지 않게 배치한다."""
         dists: dict[str, int] = {}
         angles: dict[str, int] = {}
+        rssis: dict[str, int] = {}
         center = (self._num_targets - 1) / 2
         for i in range(self._num_targets):
             tid = str(i + 1)
@@ -222,15 +232,21 @@ class SimulatorDevice(RadarDevice):
             angles[tid] = int(
                 SIM_ANGLE_INITIAL_DEG + (i - center) * SIM_TARGET_ANGLE_SPREAD_DEG
             )
-        return dists, angles
+            rssis[tid] = SIM_RSSI_INITIAL_DBM
+        return dists, angles, rssis
 
-    def _emit_measurement(self, tid: str, dist: int, angle: int) -> None:
+    def _emit_measurement(self, tid: str, dist: int, angle: int, rssi: int) -> None:
         """타겟 1건 측정을 원시 라인 로그와 함께 콜백으로 내보낸다."""
-        raw = f"DIST:{dist},ANGLE:{angle},TARGET:{tid}"
+        raw = f"DIST:{dist},ANGLE:{angle},TARGET:{tid},RSSI:{rssi}"
         self.on_log(raw)
         self.on_measurement(
             Measurement(
-                dist_cm=dist, angle_deg=angle, raw=raw, ts=time.time(), target_id=tid
+                dist_cm=dist,
+                angle_deg=angle,
+                raw=raw,
+                ts=time.time(),
+                target_id=tid,
+                rssi_dbm=float(rssi),
             )
         )
 
@@ -565,6 +581,7 @@ class UciSerialDevice(RadarDevice):
         dist_cm = int(meas.distance)
         raw = f"DIST:{dist_cm}"  # 기존 데이터 계약과 같은 표기 → 로그 콘솔이 ✔로 분류
         target_id = _normalize_target_id(getattr(meas, "mac_add", None))
+        rssi_dbm = _normalize_rssi(getattr(meas, "rssi", None))
         self.on_log(raw)
         self.on_measurement(
             Measurement(
@@ -573,6 +590,7 @@ class UciSerialDevice(RadarDevice):
                 raw=raw,
                 ts=time.time(),
                 target_id=target_id,
+                rssi_dbm=rssi_dbm,
             )
         )
 
@@ -629,6 +647,16 @@ def _normalize_target_id(value: Any) -> Optional[str]:
     if len(parts) == 2:
         return ":".join(reversed(parts))
     return text
+
+
+def _normalize_rssi(value: Any) -> Optional[float]:
+    """UCI rssi 필드를 화면용 dBm으로 정규화한다. 0은 '미지원/측정 없음' 표식이라 None 처리."""
+    if value is None:
+        return None
+    rssi = float(value)
+    if rssi == 0.0:
+        return None
+    return round(rssi, 1)
 
 
 def _friendly_open_error(port: str, e: Exception) -> str:

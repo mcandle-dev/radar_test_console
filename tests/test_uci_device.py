@@ -89,8 +89,13 @@ class Harness:
         assert not worker.is_alive()
 
 
-def make_twr_range_ntf(dist_cm: int, meas_status: int = 0x00) -> bytes:
-    """RANGE_DATA(SESSION_INFO) NTF의 TWR 측정 1건짜리 페이로드를 만든다."""
+def make_twr_range_ntf(
+    dist_cm: int, meas_status: int = 0x00, rssi_raw: int = 0x00
+) -> bytes:
+    """RANGE_DATA(SESSION_INFO) NTF의 TWR 측정 1건짜리 페이로드를 만든다.
+
+    rssi_raw는 Q7.1 고정소수(부호없음, 1바이트) 원시값 — dBm = -(rssi_raw / 2).
+    """
     p = (0).to_bytes(4, "little")  # sequence
     p += SID_LE  # session handle
     p += b"\x00"  # RFU
@@ -107,7 +112,7 @@ def make_twr_range_ntf(dist_cm: int, meas_status: int = 0x00) -> bytes:
     p += dist_cm.to_bytes(2, "little")  # 거리(cm)
     p += b"\x00" * 12  # AoA 4종 (값+FOM)
     p += b"\x00"  # slot in error
-    p += b"\x00"  # rssi
+    p += bytes([rssi_raw])  # rssi
     p += b"\x00" * 11  # RFU
     return p
 
@@ -290,6 +295,30 @@ def test_range_data_ntf_uses_mac_address_as_target_id() -> None:
 
     assert len(h.measurements) == 1
     assert h.measurements[0].target_id == "5f:dd"
+
+
+def test_range_data_ntf_reports_rssi() -> None:
+    h = Harness()
+    tr = h.connect()
+    h.device.start_ranging()
+    h.wait_worker()
+
+    tr.inject_ntf(0x02, 0x00, make_twr_range_ntf(dist_cm=85, rssi_raw=150))
+
+    assert len(h.measurements) == 1
+    assert h.measurements[0].rssi_dbm == -75.0
+
+
+def test_range_data_ntf_zero_rssi_means_unavailable() -> None:
+    h = Harness()
+    tr = h.connect()
+    h.device.start_ranging()
+    h.wait_worker()
+
+    tr.inject_ntf(0x02, 0x00, make_twr_range_ntf(dist_cm=85, rssi_raw=0))
+
+    assert len(h.measurements) == 1
+    assert h.measurements[0].rssi_dbm is None
 
 
 def test_range_data_ntf_with_failed_measurement_logs_only() -> None:

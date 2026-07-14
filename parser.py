@@ -66,7 +66,7 @@ def _split_fields(raw: str) -> Dict[str, str]:
 
 
 def _parse_measurement(fields: Dict[str, str], raw: str, ts: float) -> ParseResult:
-    """DIST(필수)/ANGLE(선택)을 정수로 변환한다. 미지 필드(RSSI 등)는 무시 = 전방 호환."""
+    """DIST(필수)/ANGLE·RSSI(선택)를 추출한다. 그 외 미지 필드(Q 등)는 무시 = 전방 호환."""
     dist_cm = _to_int(fields["DIST"])
     if dist_cm is None:
         return _invalid(raw, f"DIST is not an integer: {fields['DIST']!r}", ts)
@@ -77,6 +77,12 @@ def _parse_measurement(fields: Dict[str, str], raw: str, ts: float) -> ParseResu
         if angle_deg is None:
             return _invalid(raw, f"ANGLE is not an integer: {fields['ANGLE']!r}", ts)
 
+    rssi_dbm: Optional[float] = None
+    if "RSSI" in fields:
+        rssi_dbm = _to_float(fields["RSSI"])
+        if rssi_dbm is None:
+            return _invalid(raw, f"RSSI is not a number: {fields['RSSI']!r}", ts)
+
     target_id = fields.get("TARGET") or fields.get("ID")
     measurement = Measurement(
         dist_cm=dist_cm,
@@ -84,6 +90,7 @@ def _parse_measurement(fields: Dict[str, str], raw: str, ts: float) -> ParseResu
         raw=raw,
         ts=ts,
         target_id=target_id,
+        rssi_dbm=rssi_dbm,
     )
     return ParseResult("measurement", measurement, None, raw, None, ts)
 
@@ -188,6 +195,14 @@ def _to_int(value: str) -> Optional[int]:
     """문자열을 정수로 변환한다. 실패하면 None (호출부가 invalid로 분류)."""
     try:
         return int(value)
+    except ValueError:
+        return None
+
+
+def _to_float(value: str) -> Optional[float]:
+    """문자열을 실수로 변환한다. 실패하면 None (호출부가 invalid로 분류)."""
+    try:
+        return float(value)
     except ValueError:
         return None
 

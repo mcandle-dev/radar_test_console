@@ -48,8 +48,8 @@ class TestMeasurement:
         assert r.measurement.angle_deg == -12
 
     def test_unknown_fields_ignored(self) -> None:
-        """미지 필드(RSSI, Q 등)는 무시하고 파싱 성공 (전방 호환)."""
-        r = parse_line("DIST:85,ANGLE:-12,RSSI:-60,Q:99", ts=FIXED_TS)
+        """미지 필드(Q 등)는 무시하고 파싱 성공 (전방 호환)."""
+        r = parse_line("DIST:85,ANGLE:-12,Q:99", ts=FIXED_TS)
         assert r.kind == "measurement"
         assert r.measurement is not None
         assert r.measurement.dist_cm == 85
@@ -61,6 +61,26 @@ class TestMeasurement:
         assert r.kind == "measurement"
         assert r.measurement is not None
         assert r.measurement.target_id == "2"
+
+    def test_rssi_field(self) -> None:
+        """RSSI 필드가 있으면 신호 세기(dBm)를 보존한다."""
+        r = parse_line("DIST:85,ANGLE:-12,RSSI:-60", ts=FIXED_TS)
+        assert r.kind == "measurement"
+        assert r.measurement is not None
+        assert r.measurement.rssi_dbm == -60.0
+
+    def test_rssi_missing_defaults_to_none(self) -> None:
+        """RSSI 필드가 없으면 rssi_dbm=None (미지원 표시용)."""
+        r = parse_line("DIST:85,ANGLE:-12", ts=FIXED_TS)
+        assert r.kind == "measurement"
+        assert r.measurement is not None
+        assert r.measurement.rssi_dbm is None
+
+    def test_rssi_invalid_value(self) -> None:
+        """RSSI가 숫자가 아니면 invalid로 분류한다."""
+        r = parse_line("DIST:85,ANGLE:-12,RSSI:abc", ts=FIXED_TS)
+        assert r.kind == "invalid"
+        assert r.error is not None
 
 
 class TestInvalid:

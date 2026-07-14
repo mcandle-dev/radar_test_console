@@ -26,6 +26,7 @@ class Measurement:
     raw: str  # 원시 수신 라인 (디버깅용)
     ts: float  # 수신 시각(epoch)
     target_id: Optional[str] = None  # 다중 타겟 표시용 식별자
+    rssi_dbm: Optional[float] = None  # 신호 세기(dBm). 미지원이면 None
 
 
 @dataclass
