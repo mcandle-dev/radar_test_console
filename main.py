@@ -38,12 +38,12 @@ from radar_device import (
 from radar_view import RadarTarget, RadarView
 
 # 보드가 없으면 시뮬레이터(True), 있으면 실물(False). 이 한 줄만 바꾸면 된다.
-USE_SIMULATOR = True
+USE_SIMULATOR = False
 # 실물 모드에서: UCI 펌웨어(DW3_QM33 SDK UCI)면 True, CLI 텍스트 펌웨어면 False.
 USE_UCI = True
 
 PUMP_INTERVAL_S = 0.05  # 큐 → 화면 반영 주기 50ms (NFR-1 지연 100ms 이내)
-RX_TIMEOUT_S = 2.0  # 무수신 판정 (NFR-3)
+RX_TIMEOUT_S = 60.0  # 무수신 판정 (NFR-3) — 1분
 RECONNECT_INTERVAL_S = 2.0  # 자동 재연결 재시도 주기 (NFR-4)
 RATE_WINDOW_S = 1.0  # 수신율(건/초) 계산 창
 LOG_MAX_LINES = 300  # 로그 콘솔 화면 최대 줄 수 (메모리 보호)
