@@ -541,7 +541,7 @@ class RadarApp:
                 ft.Segment(value=MODE_MANUAL, label=ft.Text("수동 입력")),
                 ft.Segment(value=MODE_OOB, label=ft.Text("OOB 자동")),
             ],
-            selected={MODE_MANUAL},  # 기본 수동 — 검증된 경로를 회귀 기준으로 보존
+            selected=[MODE_MANUAL],  # 기본 수동 — 검증된 경로를 회귀 기준으로 보존
             on_change=self._on_mode_change,
             tooltip="수동=기존 방식(기본) / OOB=BLE로 폰 주소 자동 수신. 레인징 중 전환 불가",
         )
@@ -576,7 +576,7 @@ class RadarApp:
             width=250,
             label="발견 목록",
             visible=False,
-            on_change=self._on_oob_list_select,
+            on_select=self._on_oob_list_select,
         )
         self.oob_led = ft.Container(
             width=10, height=10, border_radius=5, bgcolor=COLOR_IDLE, visible=False
@@ -600,7 +600,7 @@ class RadarApp:
             options=[ft.dropdown.Option(o) for o in OOB_FAIL_OPTIONS],
             value=OOB_FAIL_NONE,
             visible=False,
-            on_change=self._on_oob_fail_change,
+            on_select=self._on_oob_fail_change,
         )
         self.oob_warn = ft.Text("", color=COLOR_WARN, size=12, visible=False)
         self.session_update_btn = ft.TextButton(
@@ -673,17 +673,17 @@ class RadarApp:
 
     def _on_mode_change(self, e: ft.ControlEvent) -> None:
         """수동/OOB 세그먼트 전환. 레인징 중이면 되돌린다."""
-        want_oob = MODE_OOB in (self.mode_seg.selected or set())
+        want_oob = MODE_OOB in (self.mode_seg.selected or [])
         if want_oob == self._oob_mode:
             return
         if self._ranging:
-            self.mode_seg.selected = {MODE_OOB if self._oob_mode else MODE_MANUAL}
+            self.mode_seg.selected = [MODE_OOB if self._oob_mode else MODE_MANUAL]
             self.log.append_sys(
                 "레인징 중에는 연결 방식을 바꿀 수 없습니다 — 정지 후 전환"
             )
         elif want_oob:
             if not self._enter_oob_mode():
-                self.mode_seg.selected = {MODE_MANUAL}
+                self.mode_seg.selected = [MODE_MANUAL]
         else:
             self._exit_oob_mode()
         self.page.update()
