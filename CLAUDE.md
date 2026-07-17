@@ -9,6 +9,8 @@ Windows 11용 Flet 데스크톱 앱. 상용 앱이 아닌 **초도 기능 검증
 ## Ground Truth 문서 (반드시 먼저 읽을 것)
 - `../Flet_레이더_테스트앱_요구사항정의서.md` — 무엇을 만들지 (FR/NFR, UART 포맷, UI, 검수 기준)
 - `../Flet_레이더_코딩가이드_하네스엔지니어링.md` — 어떻게 만들지 (아키텍처, 코딩 규칙)
+- `docs/oob/BLE_OOB_인터페이스_사양서.md` — OOB 2차 BLE 계약 (**마스터** v0.2, 앱 리포에 사본 — 개정 시 버전 업 + 양쪽 동시 커밋)
+- `docs/oob/변경요구_radar_test_console.md` — OOB 2차 콘솔 변경요구 (FR-OOB-0~9, 구현 5단계)
 
 **충돌 해결 규칙:** 두 문서가 다르면 **코딩가이드가 우선**한다. 확정된 결정:
 1. 파일 구조는 코딩가이드 2장을 따른다 → `serial_worker.py`는 만들지 않는다.
@@ -47,6 +49,9 @@ radar_test_console/
 - `SimulatorDevice`: 세션 단계(BLE_ADV→BLE_CONN→OOB_DONE→RANGING)를 흘린 뒤
   거리/각도 랜덤 워크 10Hz 생성. 실패 재현 토글(`STATE:ERR,REASON:OOB_TIMEOUT`) 포함.
 - `start_ranging`/`stop_ranging`은 펌웨어 미지원 가능성 있음 → 실패해도 앱이 죽지 않게 no-op+로그.
+- BLE(OOB)는 `ble_oob.py` 계층에만. **UI 코드에 `import bleak` 절대 금지.**
+  `BleOobClient`(ABC) + `BleakOobClient`(실물)/`SimulatorOobClient`(하네스) — `RadarDevice` 패턴과 동일.
+  bleak의 asyncio 루프는 전용 스레드에서 구동, UI 전달은 기존 콜백→queue→50ms 타이머 경로만.
 
 ## 데이터 계약 (UART, LF 종단, 한 줄 한 메시지)
 - 측정: `DIST:85,ANGLE:-12` — DIST=cm(0~5000), ANGLE=°(-90~+90, 0=정면, 음수=좌)
@@ -56,6 +61,23 @@ radar_test_console/
   알 수 없는 추가 필드(Q 등)는 무시하고 파싱 성공 처리 (전방 호환).
 - 깨진 라인은 앱을 죽이지 말고 `kind="invalid"` + 원문을 로그에 남길 것.
 - 범위 초과 값은 파싱 성공 처리하되 UI에서 경고색 표시.
+
+## OOB 계약 (BLE GATT — 사양서 v0.2, 양 리포 동일해야 함)
+- 역할: 폰=GATT peripheral(광고) / PC=central(bleak). 연결 방식은 사용자 선택 `수동`/`OOB 자동`, **기본값 수동**.
+  OOB는 부가 경로 — BLE 실패·부재 시 기존 수동 입력 흐름이 그대로 동작해야 한다.
+- **Service UUID**: `5F1D0001-9A8B-4C7D-B2E3-6F4A5D8C9B0A`
+- **OOB_INFO Characteristic UUID**: `5F1D0002-9A8B-4C7D-B2E3-6F4A5D8C9B0A` — 속성 Read+Notify (Write 없음)
+- **OOB_INFO 페이로드 v1 (7B 고정)**:
+  | 오프셋 | 크기 | 필드 | 형식 |
+  |---|---|---|---|
+  | 0 | 1B | `protocol_version` | uint8, v1=0x01 |
+  | 1 | 2B | `uwb_address` | 표시 순서 그대로 raw 2B — **"5F:DD" → `5F DD`, 반전 금지** |
+  | 3 | 4B | `session_id` | uint32 **little-endian** — 42 = `2A 00 00 00` |
+- 파서는 길이 ≥7B만 확인, 뒤 추가 바이트는 무시(전방 호환). `protocol_version`>0x01이면
+  v1 규칙으로 파싱 시도 + "스펙 버전 불일치" 경고 (하드 실패 금지).
+- UUID·버전·타임아웃 상수는 `oob_params.py` 한 곳에서만 참조 (`uci_params.py`와 같은 원칙).
+  페이로드 파서는 순수 함수 `oob_parser.py` + pytest.
+- BLE 끊김은 UWB 세션과 무관: OOB 클라이언트 종료가 UCI 레인징을 중단시키지 않는다.
 
 ## 레이더 좌표계
 - 중심=보드, 반지름=거리, 0°=화면 위(12시), 좌측 음수/우측 양수, 표시 범위 −90°~+90°
