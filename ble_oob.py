@@ -300,7 +300,8 @@ class BleakOobClient(BleOobClient):
     def scan(self) -> None:
         """Service UUID 필터 스캔. 결과는 on_scan_result로 온다."""
         self.on_log(
-            f"{OOB_LOG_PREFIX} 스캔 시작 (UUID 필터, {self._scan_timeout:.0f}s)"
+            f"{OOB_LOG_PREFIX} 스캔 시작 "
+            f"(UUID 필터, 최대 {self._scan_timeout:.0f}s · 첫 발견 즉시 종료)"
         )
         self._submit(self._scan_async())
 
@@ -351,13 +352,27 @@ class BleakOobClient(BleOobClient):
     # --- 루프 스레드에서 실행되는 코루틴 (여기서도 콜백만 호출, UI 직접 접근 금지) ---
 
     async def _scan_async(self) -> None:
-        """어댑터 없음·OFF도 예외로 죽지 말고 빈 목록으로 알린다 (사양서 §7-10)."""
+        """첫 OOB 광고 발견 즉시 스캔을 끝낸다. 어댑터 오류는 빈 목록으로 알린다."""
+        discovered: Dict[str, Tuple["BLEDevice", "AdvertisementData"]] = {}
+        first_match = asyncio.Event()
+
+        def on_detect(device: "BLEDevice", adv: "AdvertisementData") -> None:
+            """UUID가 일치하는 첫 광고만 보존하고 대기 중인 스캔을 깨운다."""
+            if first_match.is_set() or not _advertises_oob_service(adv):
+                return
+            discovered[device.address] = (device, adv)
+            first_match.set()
+
         try:
-            discovered = await BleakScanner.discover(
-                timeout=self._scan_timeout,
-                return_adv=True,  # RSSI는 광고 데이터에만 있다 (BLEDevice에는 없음)
+            scanner = BleakScanner(
+                detection_callback=on_detect,
                 service_uuids=[SERVICE_UUID],
             )
+            async with scanner:
+                try:
+                    await asyncio.wait_for(first_match.wait(), self._scan_timeout)
+                except asyncio.TimeoutError:
+                    pass
         except (BleakError, OSError) as exc:
             self.on_log(f"{OOB_LOG_PREFIX} 스캔 실패: {exc} (수동 입력 경로는 유효)")
             self.on_scan_result([])
@@ -514,6 +529,12 @@ def peripherals_from_discovery(
         )
         for address, (device, adv) in discovered.items()
     ]
+
+
+def _advertises_oob_service(adv: "AdvertisementData") -> bool:
+    """광고의 Service UUID 목록에 OOB UUID가 있는지 대소문자 무관하게 확인한다."""
+    expected = SERVICE_UUID.lower()
+    return any(uuid.lower() == expected for uuid in (adv.service_uuids or []))
 
 
 def _random_address(exclude: List[str]) -> str:

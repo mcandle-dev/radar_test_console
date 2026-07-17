@@ -1,10 +1,13 @@
 """OOB 클라이언트 단위테스트 — 폰·BLE 없이 전 흐름·실패 토글과
 BleakOobClient의 BLE 무관 부분(스캔 결과 변환·페이로드 처리·안전 종료)을 검증한다."""
 
+import asyncio
 import threading
+import time
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
+import ble_oob
 from ble_oob import (
     REASON_BLE_CONN_FAIL,
     REASON_OOB_PARSE,
@@ -213,7 +216,7 @@ def fake_discovery(
 ) -> Dict[str, Tuple[Any, Any]]:
     """bleak 스캔 결과 형태(dict[주소] = (BLEDevice, AdvertisementData))를 흉내 낸다."""
     device = SimpleNamespace(address=address, name=device_name)
-    adv = SimpleNamespace(local_name=local_name, rssi=rssi)
+    adv = SimpleNamespace(local_name=local_name, rssi=rssi, service_uuids=[])
     return {address: (device, adv)}
 
 
@@ -243,6 +246,45 @@ class TestBleakClientOffline:
     def test_bleak_available(self) -> None:
         """requirements.txt에 고정된 bleak가 실제로 import된다."""
         assert is_bleak_available()
+
+    def test_scan_stops_after_first_matching_advertisement(
+        self, monkeypatch: Any
+    ) -> None:
+        """첫 OOB UUID 광고가 오면 전체 timeout을 기다리지 않고 스캔을 종료한다."""
+        device = SimpleNamespace(address="AA:BB:CC:DD:EE:FF", name="Galaxy")
+        adv = SimpleNamespace(
+            local_name="UWB-OOB",
+            rssi=-48,
+            service_uuids=[ble_oob.SERVICE_UUID.lower()],
+        )
+
+        class FakeScanner:
+            """진입 직후 광고 한 건을 전달하고 context 종료 여부를 기록한다."""
+
+            stopped = False
+
+            def __init__(self, detection_callback: Any, **_kwargs: Any) -> None:
+                self.callback = detection_callback
+
+            async def __aenter__(self) -> "FakeScanner":
+                asyncio.get_running_loop().call_soon(self.callback, device, adv)
+                return self
+
+            async def __aexit__(self, *_args: Any) -> None:
+                FakeScanner.stopped = True
+
+        monkeypatch.setattr(ble_oob, "BleakScanner", FakeScanner)
+        client = BleakOobClient(scan_timeout_s=5.0)
+        h = Harness(client)
+
+        started = time.monotonic()
+        asyncio.run(client._scan_async())
+
+        assert time.monotonic() - started < 0.5
+        assert FakeScanner.stopped
+        assert len(h.scans) == 1
+        assert h.scans[0][0].device_id == device.address
+        assert h.wait_state(SessionState.BLE_ADV)
 
     def test_read_emits_oob_done(self) -> None:
         """Read 성공: on_oob_info(ok) + OOB_DONE 점등 (시뮬과 동일한 계약)."""
