@@ -8,6 +8,7 @@ import logging
 import queue
 import time
 from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Deque, Dict, NamedTuple, Optional, Sequence, Tuple
 
@@ -38,7 +39,7 @@ from radar_device import (
 from radar_view import RadarTarget, RadarView
 
 # 보드가 없으면 시뮬레이터(True), 있으면 실물(False). 이 한 줄만 바꾸면 된다.
-USE_SIMULATOR = True
+USE_SIMULATOR = False
 # 실물 모드에서: UCI 펌웨어(DW3_QM33 SDK UCI)면 True, CLI 텍스트 펌웨어면 False.
 USE_UCI = True
 
@@ -415,6 +416,30 @@ def select_primary_target(
     return min(candidates, key=rank)[0]
 
 
+@dataclass
+class OobAutoStartGate:
+    """OOB 자동 시작 요청을 준비 조건이 갖춰질 때까지 한 번 보존한다."""
+
+    pending: bool = False
+
+    def request(self) -> None:
+        """주소 수신으로 자동 시작이 필요함을 기록한다."""
+        self.pending = True
+
+    def cancel(self) -> None:
+        """모드 이탈 등으로 더 이상 자동 시작하면 안 될 때 요청을 지운다."""
+        self.pending = False
+
+    def consume_if_ready(
+        self, *, connected: bool, session_ready: bool, ranging: bool
+    ) -> bool:
+        """모든 조건이 맞으면 요청을 한 번 소비하고 True를 반환한다."""
+        if not self.pending or not connected or not session_ready or ranging:
+            return False
+        self.pending = False
+        return True
+
+
 class RadarApp:
     """디바이스 콜백 → queue → 50ms 펌프로 화면을 갱신하는 앱 전체 배선."""
 
@@ -439,6 +464,7 @@ class RadarApp:
         self._oob_found: list[OobPeripheral] = []
         self._oob_address: Optional[str] = None
         self._pending_session_id: Optional[int] = None
+        self._oob_autostart = OobAutoStartGate()
         self._ranging = False
 
         self._meas_ts: Deque[float] = deque()
@@ -711,6 +737,7 @@ class RadarApp:
         if self.oob_client is not None:
             self.oob_client.disconnect()  # UWB 세션에는 영향 없음 (BLE는 OOB 전용)
         self._oob_mode = False
+        self._oob_autostart.cancel()
         self.dest_mac_tf.read_only = False
         self.dest_mac_tf.visible = isinstance(self.device, UciSerialDevice)
         self.dest_mac_tf.label = "폰 주소"
@@ -806,6 +833,7 @@ class RadarApp:
         self.log.append_sys(
             f"SESSION_ID {old} → {uci_params.SESSION_ID} 갱신 (수신값 적용)"
         )
+        self._try_oob_autostart()
         self.page.update()
 
     def _connect_oob(self, peripheral: OobPeripheral) -> None:
@@ -845,7 +873,10 @@ class RadarApp:
             if self.oob_client is not None:
                 self.oob_client.read_oob()
         elif event.state == SessionState.OOB_DONE:
-            self._set_oob_status("연결됨 · OOB 완료", COLOR_OK)
+            if self._oob_autostart.pending:
+                self._show_oob_autostart_wait()
+            else:
+                self._set_oob_status("연결됨 · OOB 완료", COLOR_OK)
         elif event.state == SessionState.ERR:
             self._set_oob_status(
                 f"실패: {event.reason or '?'} — 재스캔으로 재시도", COLOR_ERR
@@ -892,8 +923,40 @@ class RadarApp:
             else:
                 self.log.append_sys(f"주소 변경됨: {prev} → {address}")
         if self.autostart_sw.value and not self._ranging:
-            self.log.append_sys("자동 시작: start_ranging 호출 (FR-OOB-5)")
+            self._oob_autostart.request()
+            self._try_oob_autostart()
+
+    def _try_oob_autostart(self) -> bool:
+        """UCI 연결·SessionID 확인 후 대기 중 자동 시작을 정확히 한 번 실행한다."""
+        if not self.autostart_sw.value:
+            self._oob_autostart.cancel()
+            return False
+        started = self._oob_autostart.consume_if_ready(
+            connected=self.device.is_connected(),
+            session_ready=self._pending_session_id is None,
+            ranging=self._ranging,
+        )
+        if started:
+            self.log.append_sys("자동 시작: 준비 완료 → start_ranging 1회 호출")
             self.device.start_ranging()
+            self._set_oob_status("OOB 완료 · 레인징 시작 중", COLOR_ACTIVE)
+            return True
+        if self._oob_autostart.pending:
+            self._show_oob_autostart_wait()
+        return False
+
+    def _show_oob_autostart_wait(self) -> None:
+        """자동 시작이 대기 중인 이유를 OOB 상태와 로그에 명확히 표시한다."""
+        if self._pending_session_id is not None:
+            reason = "SessionID 확인 대기"
+        elif not self.device.is_connected():
+            reason = "UCI 연결 대기"
+        else:
+            reason = "레인징 종료 대기"
+        status = f"OOB 완료 · 자동 시작 대기 ({reason})"
+        if self.oob_status.value != status:
+            self.log.append_sys(f"자동 시작 대기: {reason}")
+        self._set_oob_status(status, COLOR_WARN)
 
     def _handle_oob_disconnect(self, reason: str) -> None:
         """BLE 연결 해제 — UWB 세션은 유지 (사양서 §7-7), 표시만 갱신."""
@@ -936,6 +999,7 @@ class RadarApp:
             self._connected_at = time.time()
             self.connect_btn.text = "해제"
             self.log.append_sys(f"연결 시작: port={port}, baud={baud}")
+            self._try_oob_autostart()
 
     def _disconnect(self) -> None:
         """디바이스를 안전 종료하고 화면을 미연결 상태로 되돌린다."""
@@ -1164,6 +1228,7 @@ class RadarApp:
         if self.device.is_connected():
             self._connected_at = now
             self.log.append_sys("자동 재연결 성공")
+            self._try_oob_autostart()
         return True
 
 
